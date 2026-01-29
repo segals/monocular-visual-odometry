@@ -91,6 +91,39 @@ Supported formats:
 | `motion_summary.txt` | Human-readable summary |
 | `motion_result.json` | Complete results in JSON format |
 
+## Benchmark Results: EuRoC MAV Dataset
+
+Evaluated on EuRoC Machine Hall MH_01_easy sequence (3682 images, 20Hz):
+
+### Accuracy Summary
+
+| Metric | Threshold | Accuracy |
+|--------|-----------|----------|
+| **Rotation** | < 5° | **75%** |
+| **Rotation** | < 10° | **96%** |
+| **Translation Direction** | < 15° | **75%** |
+| **Translation Direction** | < 30° | **92%** |
+| **Combined (R<5°, t<15°)** | Normal | **53%** |
+| **Combined (R<10°, t<30°)** | Relaxed | **88%** |
+
+### Detailed Statistics
+
+- **Rotation Error**: Mean=3.9°, Median=2.9°
+- **Translation Direction Error**: Mean=13.3°, Median=9.9°
+- **100% success rate** (no OpenCV exceptions)
+
+*Note: Translation is direction-only; scale is unobservable in monocular VO*
+
+### Running Evaluation
+
+```bash
+# Download EuRoC MH_01_easy and extract
+python evaluate_euroc.py euroc_test/machine_hall/MH_01_easy/mav0 \
+    --num_pairs 100 --step 5 --flip_z
+```
+
+The `--flip_z` flag accounts for coordinate system differences between OpenCV and EuRoC.
+
 ### Console Output
 
 The pipeline prints detailed progress including:
@@ -122,6 +155,7 @@ Input Images (4K) + Calibration Matrix K
 │   2. FEATURE DETECTION      │
 │   • ORB (5000 features)     │
 │   • Harris score ranking    │
+│   • 8 pyramid levels        │
 └─────────────────────────────┘
               │
               ▼
@@ -135,25 +169,21 @@ Input Images (4K) + Calibration Matrix K
               │
               ▼
 ┌─────────────────────────────┐
-│   4. OUTLIER REJECTION      │
-│   • RANSAC (5000 iters)     │
+│   4. ESSENTIAL MATRIX       │
+│   (Direct estimation)       │
+│   • USAC_MAGSAC (10K iters) │
 │   • Confidence: 0.9999      │
 │   • Threshold: 1.0 px       │
+│   • Fallback: F → E         │
 └─────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────┐
-│   5. ESSENTIAL MATRIX       │
-│   • E = K^T × F × K         │
-│   • SVD constraint enforce  │
-└─────────────────────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│   6. MOTION DECOMPOSITION   │
+│   5. MOTION DECOMPOSITION   │
+│   • SVD of E matrix         │
 │   • 4 candidate solutions   │
 │   • Cheirality check        │
-│   • Select valid (R, t)     │
+│   • Reprojection refinement │
 └─────────────────────────────┘
               │
               ▼

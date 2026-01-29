@@ -75,7 +75,11 @@ results/
 *.jpg
 *.jpeg
 *.png
-!test_images/
+
+# Large dataset files
+euroc_test/
+*.zip
+*.bag
 
 # OS files
 .DS_Store

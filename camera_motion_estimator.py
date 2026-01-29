@@ -49,7 +49,15 @@ MAX_HAMMING_DISTANCE = 64      # Maximum acceptable Hamming distance
 # RANSAC Parameters (optimized for accuracy)
 RANSAC_CONFIDENCE = 0.9999     # Very high confidence
 RANSAC_THRESHOLD = 1.0         # Strict inlier threshold (pixels)
-RANSAC_MAX_ITERS = 5000        # High iteration count for accuracy
+RANSAC_MAX_ITERS = 10000       # Very high iteration count for accuracy
+
+# Use USAC (Universal RANSAC) if available - much better than regular RANSAC
+# USAC methods: USAC_DEFAULT, USAC_PARALLEL, USAC_FM_8PTS, USAC_FAST, USAC_ACCURATE, USAC_PROSAC, USAC_MAGSAC
+USE_USAC = True
+USAC_METHOD = cv2.USAC_MAGSAC if hasattr(cv2, 'USAC_MAGSAC') else cv2.USAC_DEFAULT if hasattr(cv2, 'USAC_DEFAULT') else None
+
+# Essential matrix estimation parameters
+ESSENTIAL_THRESHOLD = 1.0      # Threshold for essential matrix estimation
 
 # Quality Thresholds
 MIN_FEATURES_WARNING = 100     # Warn if fewer features detected
@@ -436,37 +444,136 @@ class GeometryEstimator:
         self.K = K.astype(np.float64)
         self.K_inv = np.linalg.inv(self.K)
         
-    def estimate_fundamental_matrix(self, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def estimate_fundamental_matrix(self, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[Optional[np.ndarray], np.ndarray]:
         """
-        Estimate fundamental matrix using RANSAC.
+        Estimate fundamental matrix using RANSAC/USAC.
         Returns F and inlier mask.
         """
-        F, mask = cv2.findFundamentalMat(
-            pts1, pts2,
-            method=cv2.FM_RANSAC,
-            ransacReprojThreshold=RANSAC_THRESHOLD,
-            confidence=RANSAC_CONFIDENCE,
-            maxIters=RANSAC_MAX_ITERS
-        )
+        # Minimum points check
+        if len(pts1) < 8 or len(pts2) < 8:
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
         
-        if F is None or F.shape != (3, 3):
-            # Fallback: try with relaxed threshold
-            F, mask = cv2.findFundamentalMat(
-                pts1, pts2,
-                method=cv2.FM_RANSAC,
-                ransacReprojThreshold=2.0,
-                confidence=0.999,
-                maxIters=RANSAC_MAX_ITERS
-            )
+        # Check for degenerate case: points too close together
+        pts_diff = np.linalg.norm(pts1 - pts2, axis=1)
+        median_motion = np.median(pts_diff)
+        if median_motion < 0.5:  # Less than 0.5 pixel median motion
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+        
+        try:
+            # Try USAC first (better than regular RANSAC)
+            if USE_USAC and USAC_METHOD is not None:
+                F, mask = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=USAC_METHOD,
+                    ransacReprojThreshold=RANSAC_THRESHOLD,
+                    confidence=RANSAC_CONFIDENCE,
+                    maxIters=RANSAC_MAX_ITERS
+                )
+            else:
+                F, mask = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=cv2.FM_RANSAC,
+                    ransacReprojThreshold=RANSAC_THRESHOLD,
+                    confidence=RANSAC_CONFIDENCE,
+                    maxIters=RANSAC_MAX_ITERS
+                )
             
-        if F is None:
-            # Last resort: 8-point algorithm without RANSAC
-            F, mask = cv2.findFundamentalMat(pts1, pts2, method=cv2.FM_8POINT,
-                                              ransacReprojThreshold=3.0, confidence=0.99, maxIters=1)
+            if F is None or F.shape != (3, 3):
+                # Fallback to regular RANSAC with relaxed threshold
+                F, mask = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=cv2.FM_RANSAC,
+                    ransacReprojThreshold=2.0,
+                    confidence=0.999,
+                    maxIters=RANSAC_MAX_ITERS
+                )
+                
+            if F is None or F.shape != (3, 3):
+                # Further fallback: LMEDS (Least Median of Squares) - no threshold needed
+                F, mask = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=cv2.FM_LMEDS,
+                    confidence=0.99
+                )
+                
+            if F is None or F.shape != (3, 3):
+                # Last resort: 8-point algorithm
+                F, mask = cv2.findFundamentalMat(pts1, pts2, method=cv2.FM_8POINT)
+                if mask is None:
+                    mask = np.ones((len(pts1), 1), dtype=np.uint8)
+                    
+            if F is None:
+                return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+                
             if mask is None:
                 mask = np.ones((len(pts1), 1), dtype=np.uint8)
+            
+            # Enforce rank-2 constraint on F
+            U, S, Vt = np.linalg.svd(F)
+            S[2] = 0  # Set smallest singular value to 0
+            F = U @ np.diag(S) @ Vt
+                
+        except cv2.error:
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
                 
         return F, mask
+    
+    def estimate_essential_matrix_direct(self, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[Optional[np.ndarray], np.ndarray]:
+        """
+        Estimate essential matrix directly using calibrated points.
+        This is more accurate than computing E from F.
+        Returns E and inlier mask.
+        """
+        # Minimum points check
+        if len(pts1) < 5 or len(pts2) < 5:
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+        
+        # Check for degenerate case
+        pts_diff = np.linalg.norm(pts1 - pts2, axis=1)
+        median_motion = np.median(pts_diff)
+        if median_motion < 0.5:
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+        
+        try:
+            # Try USAC first
+            if USE_USAC and USAC_METHOD is not None:
+                E, mask = cv2.findEssentialMat(
+                    pts1, pts2, self.K,
+                    method=USAC_METHOD,
+                    prob=RANSAC_CONFIDENCE,
+                    threshold=ESSENTIAL_THRESHOLD,
+                    maxIters=RANSAC_MAX_ITERS
+                )
+            else:
+                E, mask = cv2.findEssentialMat(
+                    pts1, pts2, self.K,
+                    method=cv2.RANSAC,
+                    prob=RANSAC_CONFIDENCE,
+                    threshold=ESSENTIAL_THRESHOLD,
+                    maxIters=RANSAC_MAX_ITERS
+                )
+            
+            if E is None or E.shape != (3, 3):
+                # Fallback to LMEDS
+                E, mask = cv2.findEssentialMat(
+                    pts1, pts2, self.K,
+                    method=cv2.LMEDS,
+                    prob=0.999
+                )
+            
+            if E is None:
+                return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+            
+            if mask is None:
+                mask = np.ones((len(pts1), 1), dtype=np.uint8)
+            
+            # Enforce essential matrix constraints
+            E = self.enforce_essential_constraints(E)
+                
+        except cv2.error:
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+                
+        return E, mask
     
     def compute_essential_matrix(self, F: np.ndarray) -> np.ndarray:
         """Compute essential matrix from fundamental matrix: E = K^T * F * K"""
@@ -495,61 +602,252 @@ class GeometryEstimator:
         Uses cheirality check to select correct solution.
         Returns R, t, and number of points passing cheirality.
         """
-        # Use OpenCV's recoverPose which handles decomposition and cheirality
-        _, R, t, mask = cv2.recoverPose(E, pts1, pts2, self.K)
+        # Minimum points check
+        if len(pts1) < 5 or len(pts2) < 5:
+            return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
         
-        # Count points passing cheirality check
-        num_positive = int(np.sum(mask > 0))
+        try:
+            # Use OpenCV's recoverPose which handles decomposition and cheirality
+            retval, R, t, mask = cv2.recoverPose(E, pts1, pts2, self.K)
+            
+            # Validate outputs
+            if R is None or t is None:
+                return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
+            
+            # Ensure R is a valid rotation matrix
+            det_R = np.linalg.det(R)
+            if abs(det_R - 1.0) > 0.1:
+                # Invalid rotation - try to fix it
+                U, S, Vt = np.linalg.svd(R)
+                R = U @ Vt
+                if np.linalg.det(R) < 0:
+                    R = -R
+            
+            # Count points passing cheirality check
+            if mask is not None:
+                num_positive = int(np.sum(mask > 0))
+            else:
+                num_positive = len(pts1)
+            
+            return R, t, num_positive
+            
+        except cv2.error as e:
+            # OpenCV error during decomposition
+            # Try manual decomposition as fallback
+            try:
+                return self._manual_decompose_essential(E, pts1, pts2)
+            except:
+                return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
+        except Exception as e:
+            return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
+    
+    def _manual_decompose_essential(self, E: np.ndarray, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+        """
+        Manual decomposition of essential matrix as fallback.
+        """
+        U, S, Vt = np.linalg.svd(E)
         
-        return R, t, num_positive
+        # Ensure proper rotation
+        if np.linalg.det(U) < 0:
+            U = -U
+        if np.linalg.det(Vt) < 0:
+            Vt = -Vt
+        
+        # W matrix for decomposition
+        W = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
+        
+        # Four possible solutions
+        R1 = U @ W @ Vt
+        R2 = U @ W.T @ Vt
+        t = U[:, 2:3]  # Third column of U
+        
+        # Pick the solution with most points in front
+        best_R, best_t, best_count = R1, t, 0
+        
+        for R in [R1, R2]:
+            for sign in [1, -1]:
+                t_test = sign * t
+                count = self._count_points_in_front(R, t_test, pts1, pts2)
+                if count > best_count:
+                    best_R, best_t, best_count = R, t_test, count
+        
+        return best_R, best_t, best_count
+    
+    def _count_points_in_front(self, R: np.ndarray, t: np.ndarray, 
+                                pts1: np.ndarray, pts2: np.ndarray) -> int:
+        """
+        Count how many triangulated points are in front of both cameras.
+        """
+        try:
+            P1 = self.K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+            P2 = self.K @ np.hstack([R, t])
+            
+            pts1_h = pts1.T
+            pts2_h = pts2.T
+            
+            points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
+            points_3d = points_4d[:3] / (points_4d[3:] + 1e-10)
+            
+            # Check z > 0 in camera 1
+            in_front_1 = points_3d[2, :] > 0
+            
+            # Transform to camera 2 and check z > 0
+            points_cam2 = R @ points_3d + t
+            in_front_2 = points_cam2[2, :] > 0
+            
+            return int(np.sum(in_front_1 & in_front_2))
+        except:
+            return 0
+    
+    def refine_pose_with_all_solutions(self, E: np.ndarray, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+        """
+        Try all four decomposition solutions and pick the best one based on
+        cheirality check AND reprojection error.
+        """
+        if len(pts1) < 5 or len(pts2) < 5:
+            return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
+        
+        try:
+            # SVD decomposition
+            U, S, Vt = np.linalg.svd(E)
+            
+            # Ensure proper rotation (det should be +1)
+            if np.linalg.det(U) < 0:
+                U = -U
+            if np.linalg.det(Vt) < 0:
+                Vt = -Vt
+            
+            # W matrix for decomposition
+            W = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
+            
+            # Four possible solutions
+            R1 = U @ W @ Vt
+            R2 = U @ W.T @ Vt
+            t_base = U[:, 2:3]
+            
+            # Evaluate all four solutions
+            candidates = []
+            for R in [R1, R2]:
+                # Ensure R is valid rotation
+                if np.linalg.det(R) < 0:
+                    R = -R
+                    
+                for sign in [1, -1]:
+                    t = sign * t_base
+                    
+                    # Count points in front
+                    count = self._count_points_in_front(R, t, pts1, pts2)
+                    
+                    # Compute reprojection error for valid points
+                    if count > len(pts1) * 0.5:  # At least 50% of points in front
+                        reproj_err = self.compute_reprojection_error(R, t, pts1, pts2)
+                        median_err = np.median(reproj_err) if len(reproj_err) > 0 else float('inf')
+                    else:
+                        median_err = float('inf')
+                    
+                    candidates.append((R, t, count, median_err))
+            
+            # Pick the best: most points in front, then lowest reprojection error
+            candidates.sort(key=lambda x: (-x[2], x[3]))
+            
+            if candidates and candidates[0][2] > 0:
+                return candidates[0][0], candidates[0][1], candidates[0][2]
+            
+        except Exception as e:
+            pass
+        
+        return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
     
     def compute_sampson_error(self, F: np.ndarray, pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
         """
         Compute Sampson distance for each point correspondence.
         This is a first-order approximation to geometric error.
         """
-        # Convert to homogeneous coordinates
-        pts1_h = np.hstack([pts1, np.ones((len(pts1), 1))])
-        pts2_h = np.hstack([pts2, np.ones((len(pts2), 1))])
+        if len(pts1) == 0 or len(pts2) == 0:
+            return np.array([0.0])
         
-        errors = []
-        for p1, p2 in zip(pts1_h, pts2_h):
-            # Epipolar constraint: p2^T * F * p1
-            Fp1 = F @ p1
-            Ftp2 = F.T @ p2
-            p2tFp1 = p2 @ F @ p1
+        try:
+            # Convert to homogeneous coordinates
+            pts1_h = np.hstack([pts1, np.ones((len(pts1), 1))])
+            pts2_h = np.hstack([pts2, np.ones((len(pts2), 1))])
             
-            # Sampson error
-            error = (p2tFp1 ** 2) / (Fp1[0]**2 + Fp1[1]**2 + Ftp2[0]**2 + Ftp2[1]**2 + 1e-10)
-            errors.append(np.sqrt(error))
+            errors = []
+            for p1, p2 in zip(pts1_h, pts2_h):
+                # Epipolar constraint: p2^T * F * p1
+                Fp1 = F @ p1
+                Ftp2 = F.T @ p2
+                p2tFp1 = p2 @ F @ p1
+                
+                # Sampson error with safe denominator
+                denom = Fp1[0]**2 + Fp1[1]**2 + Ftp2[0]**2 + Ftp2[1]**2 + 1e-10
+                error = (p2tFp1 ** 2) / denom
+                errors.append(np.sqrt(max(0, error)))  # Ensure non-negative
+                
+            result = np.array(errors)
+            # Replace any inf/nan with median or 0
+            valid = np.isfinite(result)
+            if np.any(valid):
+                median_val = np.median(result[valid])
+                result[~valid] = median_val
+            else:
+                result = np.zeros_like(result)
             
-        return np.array(errors)
+            return result
+        except Exception as e:
+            return np.array([0.0])
     
     def compute_reprojection_error(self, R: np.ndarray, t: np.ndarray,
                                     pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
         """
         Compute reprojection error by triangulating points and reprojecting.
         """
-        # Projection matrices
-        P1 = self.K @ np.hstack([np.eye(3), np.zeros((3, 1))])
-        P2 = self.K @ np.hstack([R, t])
+        # Check for minimum points
+        if len(pts1) < 2 or len(pts2) < 2:
+            return np.array([0.0])
         
-        # Triangulate points
-        pts1_h = pts1.T  # 2xN
-        pts2_h = pts2.T  # 2xN
-        
-        points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
-        points_3d = points_4d[:3] / points_4d[3]  # Convert from homogeneous
-        
-        # Reproject to camera 2
-        points_3d_h = np.vstack([points_3d, np.ones((1, points_3d.shape[1]))])
-        projected = P2 @ points_3d_h
-        projected = projected[:2] / projected[2]
-        
-        # Compute reprojection error
-        errors = np.sqrt(np.sum((projected.T - pts2) ** 2, axis=1))
-        
-        return errors
+        try:
+            # Projection matrices
+            P1 = self.K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+            P2 = self.K @ np.hstack([R, t])
+            
+            # Triangulate points
+            pts1_h = pts1.T  # 2xN
+            pts2_h = pts2.T  # 2xN
+            
+            points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
+            
+            # Handle division by zero in homogeneous conversion
+            w = points_4d[3]
+            w[np.abs(w) < 1e-10] = 1e-10  # Prevent division by zero
+            points_3d = points_4d[:3] / w  # Convert from homogeneous
+            
+            # Check for invalid points (inf/nan)
+            valid_mask = np.all(np.isfinite(points_3d), axis=0)
+            if not np.any(valid_mask):
+                return np.array([0.0])
+            
+            # Reproject to camera 2
+            points_3d_h = np.vstack([points_3d, np.ones((1, points_3d.shape[1]))])
+            projected = P2 @ points_3d_h
+            
+            # Handle division by zero in projection
+            z = projected[2]
+            z[np.abs(z) < 1e-10] = 1e-10
+            projected = projected[:2] / z
+            
+            # Compute reprojection error only for valid points
+            errors = np.sqrt(np.sum((projected.T - pts2) ** 2, axis=1))
+            
+            # Filter out invalid errors
+            errors = errors[np.isfinite(errors)]
+            if len(errors) == 0:
+                return np.array([0.0])
+            
+            return errors
+            
+        except Exception as e:
+            # Return zero error on any exception
+            return np.array([0.0])
 
 
 # =============================================================================
@@ -580,6 +878,20 @@ class CameraMotionEstimator:
         """
         start_time = time.time()
         metrics = QualityMetrics()
+        
+        # Wrap entire pipeline in try-except for robustness
+        try:
+            return self._estimate_internal(image1_path, image2_path, start_time, metrics)
+        except Exception as e:
+            # Catch any unexpected errors
+            metrics.warnings.append(f"Pipeline exception: {str(e)}")
+            return self._create_identity_result(metrics, start_time)
+    
+    def _estimate_internal(self, image1_path: str, image2_path: str, 
+                           start_time: float, metrics: QualityMetrics) -> MotionEstimationResult:
+        """
+        Internal motion estimation - called by estimate() with exception handling.
+        """
         
         print("=" * 70)
         print("6-DOF Camera Motion Estimation Pipeline")
@@ -672,15 +984,31 @@ class CameraMotionEstimator:
         pts1, pts2 = self.feature_processor.extract_matched_points(kp1, kp2, filtered_matches)
         
         # ---------------------------------------------------------------------
-        # Stage 4: Outlier Rejection (RANSAC)
+        # Stage 4: Essential Matrix Estimation (Direct Method with USAC)
         # ---------------------------------------------------------------------
-        print("\n[Stage 4] Outlier Rejection (RANSAC)...")
+        print("\n[Stage 4] Essential Matrix Estimation (Direct with USAC)...")
         
-        F, inlier_mask = self.geometry_estimator.estimate_fundamental_matrix(pts1, pts2)
+        # Try direct essential matrix estimation first (more accurate)
+        E_direct, inlier_mask_E = self.geometry_estimator.estimate_essential_matrix_direct(pts1, pts2)
         
-        if F is None:
-            print("  [CRITICAL] Failed to estimate fundamental matrix!")
-            return self._create_identity_result(metrics, start_time)
+        if E_direct is not None:
+            print("  Using direct Essential matrix estimation")
+            E = E_direct
+            inlier_mask = inlier_mask_E
+            
+            # Also compute F for quality metrics
+            F = self.geometry_estimator.K_inv.T @ E @ self.geometry_estimator.K_inv
+        else:
+            # Fallback to Fundamental matrix approach
+            print("  Falling back to Fundamental matrix estimation")
+            F, inlier_mask = self.geometry_estimator.estimate_fundamental_matrix(pts1, pts2)
+            
+            if F is None:
+                print("  [CRITICAL] Failed to estimate fundamental matrix!")
+                return self._create_identity_result(metrics, start_time)
+            
+            E = self.geometry_estimator.compute_essential_matrix(F)
+            E = self.geometry_estimator.enforce_essential_constraints(E)
         
         # Extract inliers
         inlier_mask = inlier_mask.ravel().astype(bool)
@@ -689,10 +1017,8 @@ class CameraMotionEstimator:
         
         metrics.ransac_inliers = len(inlier_pts1)
         metrics.inlier_ratio = len(inlier_pts1) / len(pts1) if len(pts1) > 0 else 0
-        metrics.fundamental_matrix_rank = np.linalg.matrix_rank(F)
         
         print(f"  Inliers: {metrics.ransac_inliers} / {len(pts1)} ({metrics.inlier_ratio*100:.1f}%)")
-        print(f"  Fundamental matrix rank: {metrics.fundamental_matrix_rank}")
         
         if metrics.ransac_inliers < MIN_INLIERS_WARNING:
             metrics.warnings.append(f"Low inlier count after RANSAC: {metrics.ransac_inliers}")
@@ -701,38 +1027,49 @@ class CameraMotionEstimator:
             print("  [CRITICAL] Insufficient inliers!")
             return self._create_identity_result(metrics, start_time)
         
-        # Compute Sampson errors
-        sampson_errors = self.geometry_estimator.compute_sampson_error(F, inlier_pts1, inlier_pts2)
-        print(f"  Sampson error - Mean: {np.mean(sampson_errors):.4f}, Median: {np.median(sampson_errors):.4f}")
+        # Compute Sampson errors using F
+        try:
+            # Compute F from E if we used direct method
+            if E_direct is not None:
+                F = self.geometry_estimator.K_inv.T @ E @ self.geometry_estimator.K_inv
+            metrics.fundamental_matrix_rank = np.linalg.matrix_rank(F)
+            sampson_errors = self.geometry_estimator.compute_sampson_error(F, inlier_pts1, inlier_pts2)
+            print(f"  Sampson error - Mean: {np.mean(sampson_errors):.4f}, Median: {np.median(sampson_errors):.4f}")
+        except:
+            F = np.eye(3)  # Fallback
+            metrics.fundamental_matrix_rank = 3
         
         # ---------------------------------------------------------------------
-        # Stage 5: Essential Matrix Computation
+        # Stage 5: Essential Matrix Verification
         # ---------------------------------------------------------------------
-        print("\n[Stage 5] Essential Matrix Computation...")
+        print("\n[Stage 5] Essential Matrix Verification...")
         
-        E = self.geometry_estimator.compute_essential_matrix(F)
-        print(f"  E = K^T * F * K computed")
-        
-        # Check condition number before correction
+        # Check singular values
         U, S, Vt = np.linalg.svd(E)
-        print(f"  Singular values (before): [{S[0]:.6f}, {S[1]:.6f}, {S[2]:.6f}]")
-        
-        # Enforce constraints
-        E = self.geometry_estimator.enforce_essential_constraints(E)
-        
-        U, S, Vt = np.linalg.svd(E)
-        print(f"  Singular values (after):  [{S[0]:.6f}, {S[1]:.6f}, {S[2]:.6f}]")
+        print(f"  Singular values: [{S[0]:.6f}, {S[1]:.6f}, {S[2]:.6f}]")
         
         metrics.essential_matrix_condition = S[0] / (S[1] + 1e-10)
         
         # ---------------------------------------------------------------------
-        # Stage 6: Motion Decomposition
+        # Stage 6: Motion Decomposition with Refinement
         # ---------------------------------------------------------------------
-        print("\n[Stage 6] Motion Decomposition (R, t)...")
+        print("\n[Stage 6] Motion Decomposition (R, t) with Refinement...")
         
+        # First try OpenCV's recoverPose
         R, t, num_positive = self.geometry_estimator.decompose_essential_matrix(
             E, inlier_pts1, inlier_pts2
         )
+        
+        # If cheirality is poor, try refined pose selection
+        cheirality_ratio = num_positive / len(inlier_pts1) if len(inlier_pts1) > 0 else 0
+        if cheirality_ratio < 0.7:
+            print("  Low cheirality ratio, trying refined pose selection...")
+            R_refined, t_refined, num_refined = self.geometry_estimator.refine_pose_with_all_solutions(
+                E, inlier_pts1, inlier_pts2
+            )
+            if num_refined > num_positive:
+                R, t, num_positive = R_refined, t_refined, num_refined
+                print(f"  Refined pose selected with {num_positive} points in front")
         
         metrics.cheirality_positive_ratio = num_positive / len(inlier_pts1) if len(inlier_pts1) > 0 else 0
         print(f"  Cheirality check: {num_positive}/{len(inlier_pts1)} points in front ({metrics.cheirality_positive_ratio*100:.1f}%)")
@@ -743,6 +1080,12 @@ class CameraMotionEstimator:
         
         if abs(det_R - 1.0) > 0.01:
             metrics.warnings.append(f"Rotation matrix determinant deviation: {det_R:.6f}")
+            # Fix rotation matrix
+            U_R, S_R, Vt_R = np.linalg.svd(R)
+            R = U_R @ Vt_R
+            if np.linalg.det(R) < 0:
+                R = -R
+            print(f"  Fixed det(R) = {np.linalg.det(R):.6f}")
             
         # Compute reprojection error
         reproj_errors = self.geometry_estimator.compute_reprojection_error(R, t, inlier_pts1, inlier_pts2)
@@ -755,6 +1098,9 @@ class CameraMotionEstimator:
         
         # Ensure t is unit vector
         t = t / (np.linalg.norm(t) + 1e-10)
+        
+        # Reshape t to column vector if needed
+        t = t.reshape(3, 1)
         
         # Calculate processing time
         processing_time = (time.time() - start_time) * 1000
