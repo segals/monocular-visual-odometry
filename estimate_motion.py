@@ -290,11 +290,18 @@ Examples:
             }
             print(json.dumps(result))
         else:
-            # Compact output for piping
-            print(f"R: {rvec[0]:.6f},{rvec[1]:.6f},{rvec[2]:.6f}")
-            print(f"t: {tvec[0]:.6f},{tvec[1]:.6f},{tvec[2]:.6f}")
-            print(f"Q: {quality:.1f}")
-            print(f"I: {num_inliers}")
+            # Matrix format output
+            print("Rotation Matrix (R):")
+            print(f"  [{R[0,0]:9.6f}  {R[0,1]:9.6f}  {R[0,2]:9.6f}]")
+            print(f"  [{R[1,0]:9.6f}  {R[1,1]:9.6f}  {R[1,2]:9.6f}]")
+            print(f"  [{R[2,0]:9.6f}  {R[2,1]:9.6f}  {R[2,2]:9.6f}]")
+            print()
+            print("Translation Vector (t):")
+            print(f"  [{tvec[0]:9.6f}]")
+            print(f"  [{tvec[1]:9.6f}]")
+            print(f"  [{tvec[2]:9.6f}]")
+            print()
+            print(f"Quality: {quality:.1f}%  |  Inliers: {num_inliers}")
         
         sys.exit(0)
         
