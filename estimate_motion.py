@@ -182,6 +182,28 @@ def estimate_motion(pts1: np.ndarray, pts2: np.ndarray, K: np.ndarray) -> tuple:
     # Recover pose
     _, R, t, pose_mask = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
     
+    # Fix translation sign using optical flow direction
+    # If features move left in image, camera moved right (positive X)
+    # If features move up in image, camera moved down (positive Y)
+    # If features expand outward (forward motion), camera moved forward (positive Z)
+    flow = pts2 - pts1
+    mean_flow = np.mean(flow[inlier_mask], axis=0)
+    
+    # For forward motion: features expand from center (FOE)
+    # Check if flow is predominantly "expanding" from image center
+    img_center = np.array([K[0, 2], K[1, 2]])  # Principal point
+    pts1_centered = pts1[inlier_mask] - img_center
+    flow_inliers = flow[inlier_mask]
+    
+    # Radial component: positive if expanding (forward motion)
+    radial_component = np.sum(pts1_centered * flow_inliers) / (np.sum(np.abs(pts1_centered)) + 1e-10)
+    
+    # If radial expansion detected but t[2] is negative, flip the sign
+    if radial_component > 0 and t[2, 0] < 0:
+        t = -t
+    elif radial_component < 0 and t[2, 0] > 0:
+        t = -t
+    
     # Calculate quality score
     quality = min(100.0, (num_inliers / 50.0) * 100.0)
     
@@ -222,7 +244,8 @@ Examples:
         img2, _ = preprocess_image(args.image2, K, dist, orig_w, orig_h, args.preserve_aspect)
         
         if args.verbose:
-            print(f"Preprocessed images to {TARGET_WIDTH}x{TARGET_HEIGHT}", file=sys.stderr)
+            h, w = img1.shape[:2]
+            print(f"Preprocessed images to {w}x{h}", file=sys.stderr)
         
         # Detect and match features
         pts1, pts2, num_matches = detect_and_match(img1, img2)
