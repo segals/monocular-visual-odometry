@@ -142,7 +142,7 @@ def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
     return r.as_matrix()
 
 
-def compute_relative_pose(pose1: Dict, pose2: Dict, T_BC: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, float]:
+def compute_relative_pose(pose1: Dict, pose2: Dict, T_BC: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, float]:
     """
     Compute relative pose from pose1 to pose2 in camera frame.
     
@@ -192,7 +192,7 @@ def compute_relative_pose(pose1: Dict, pose2: Dict, T_BC: np.ndarray = None) -> 
     else:
         t_rel_unit = t_rel
     
-    return R_rel, t_rel_unit, baseline
+    return R_rel, t_rel_unit, float(baseline)
 
 
 def compute_rotation_error(R_est: np.ndarray, R_gt: np.ndarray) -> float:
@@ -223,9 +223,13 @@ def compute_translation_error(t_est: np.ndarray, t_gt: np.ndarray, flip_z: bool 
     t_est_norm = t_est_flat / (np.linalg.norm(t_est_flat) + 1e-10)
     t_gt_norm = t_gt_flat / (np.linalg.norm(t_gt_flat) + 1e-10)
     
-    # Angle between vectors
+    # Compute angle - translation can be in either direction (sign ambiguity)
     dot = np.clip(np.dot(t_est_norm, t_gt_norm), -1, 1)
-    angle = np.arccos(np.abs(dot))  # abs because direction can be flipped
+    angle1 = np.arccos(dot)  # Direct comparison
+    angle2 = np.arccos(-dot)  # Opposite direction
+    
+    # Take the smaller angle (accounts for sign ambiguity in monocular VO)
+    angle = min(angle1, angle2)
     
     return np.degrees(angle)
 
@@ -277,7 +281,7 @@ def main():
             K = np.array(calib_data['K'], dtype=np.float64)
     else:
         # Parse from sensor.yaml
-        K = load_euroc_calibration(cam0_path / 'sensor.yaml')
+        K = load_euroc_calibration(str(cam0_path / 'sensor.yaml'))
         # Save for future use
         calib_file = euroc_path / 'calibration.json'
         with open(calib_file, 'w') as f:
@@ -288,7 +292,7 @@ def main():
     
     # Load camera-body transformation (T_BS = body-to-sensor, we need sensor-to-body inverse for ground truth)
     print("\n[2] Loading camera-body transformation...")
-    T_BS = load_camera_body_transform(cam0_path / 'sensor.yaml')
+    T_BS = load_camera_body_transform(str(cam0_path / 'sensor.yaml'))
     # T_BS transforms from body to camera, so T_BC (body-to-camera) = T_BS
     T_BC = T_BS
     R_BC = T_BC[:3, :3]
@@ -297,12 +301,12 @@ def main():
     
     # Load ground truth
     print("\n[3] Loading ground truth...")
-    ground_truth = load_euroc_ground_truth(gt_path / 'data.csv')
+    ground_truth = load_euroc_ground_truth(str(gt_path / 'data.csv'))
     print(f"    Loaded {len(ground_truth)} ground truth poses")
     
     # Load image timestamps
     print("\n[4] Loading image timestamps...")
-    timestamps = load_euroc_image_timestamps(cam0_path / 'data.csv')
+    timestamps = load_euroc_image_timestamps(str(cam0_path / 'data.csv'))
     print(f"    Found {len(timestamps)} images")
     
     # Get image list
@@ -395,6 +399,15 @@ def main():
                 print(f"    Pair {i:4d}/{args.num_pairs}: R_err={rot_err:6.2f}° | t_err={trans_err:6.2f}° | "
                       f"B={baseline*100:5.1f}cm | Q={result.metrics.quality_score:5.1f} | inliers={result.metrics.ransac_inliers:4d} {status}")
             
+            # Debug: show severe failures
+            if trans_err > 60 and args.verbose:
+                t_est_flat = result.t.flatten().copy()
+                if args.flip_z:
+                    t_est_flat[2] = -t_est_flat[2]
+                t_est_norm = t_est_flat / (np.linalg.norm(t_est_flat) + 1e-10)
+                t_gt_norm = t_gt / (np.linalg.norm(t_gt) + 1e-10)
+                print(f"         t_est={t_est_norm}, t_gt={t_gt_norm}")
+            
         except Exception as e:
             errors_count += 1
             if args.verbose:
@@ -402,6 +415,11 @@ def main():
             continue
     
     print(f"\n    Completed: {len(results)} pairs evaluated, {skipped} skipped, {errors_count} errors")
+    
+    # Initialize accuracy variables with defaults
+    rot_1deg = rot_2deg = rot_5deg = rot_10deg = 0.0
+    trans_5deg = trans_10deg = trans_15deg = trans_30deg = 0.0
+    success_strict = success_normal = success_relaxed = 0.0
     
     # Summary statistics
     print("\n" + "=" * 70)
@@ -412,21 +430,21 @@ def main():
         rot_arr = np.array(rotation_errors)
         trans_arr = np.array(translation_errors)
         
-        print(f"\n📊 ROTATION ERROR (degrees):")
-        print(f"    Mean:     {np.mean(rot_arr):7.3f}°")
-        print(f"    Median:   {np.median(rot_arr):7.3f}°")
-        print(f"    Std:      {np.std(rot_arr):7.3f}°")
-        print(f"    Min:      {np.min(rot_arr):7.3f}°")
-        print(f"    Max:      {np.max(rot_arr):7.3f}°")
+        print(f"\n[ROTATION ERROR (degrees)]:")
+        print(f"    Mean:     {np.mean(rot_arr):7.3f} deg")
+        print(f"    Median:   {np.median(rot_arr):7.3f} deg")
+        print(f"    Std:      {np.std(rot_arr):7.3f} deg")
+        print(f"    Min:      {np.min(rot_arr):7.3f} deg")
+        print(f"    Max:      {np.max(rot_arr):7.3f} deg")
         
-        print(f"\n📊 TRANSLATION DIRECTION ERROR (degrees):")
-        print(f"    Mean:     {np.mean(trans_arr):7.3f}°")
-        print(f"    Median:   {np.median(trans_arr):7.3f}°")
-        print(f"    Std:      {np.std(trans_arr):7.3f}°")
-        print(f"    Min:      {np.min(trans_arr):7.3f}°")
-        print(f"    Max:      {np.max(trans_arr):7.3f}°")
+        print(f"\n[TRANSLATION DIRECTION ERROR (degrees)]:")
+        print(f"    Mean:     {np.mean(trans_arr):7.3f} deg")
+        print(f"    Median:   {np.median(trans_arr):7.3f} deg")
+        print(f"    Std:      {np.std(trans_arr):7.3f} deg")
+        print(f"    Min:      {np.min(trans_arr):7.3f} deg")
+        print(f"    Max:      {np.max(trans_arr):7.3f} deg")
         
-        print(f"\n📈 ACCURACY THRESHOLDS:")
+        print(f"\n[ACCURACY THRESHOLDS]:")
         
         # Rotation accuracy at different thresholds
         rot_1deg = np.sum(rot_arr < 1) / len(rot_arr) * 100
@@ -463,7 +481,7 @@ def main():
         print(f"      Relaxed (R<10°, t<30°):  {success_relaxed:6.1f}%")
         
         print("\n" + "=" * 70)
-        print(f"🎯 OVERALL ACCURACY: {success_normal:.1f}% (R<5°, t<15° threshold)")
+        print(f">>> OVERALL ACCURACY: {success_normal:.1f}% (R<5deg, t<15deg threshold)")
         print("=" * 70)
     
     # Save results
@@ -488,15 +506,15 @@ def main():
                 'max': float(np.max(translation_errors)) if translation_errors else None,
             },
             'accuracy_percentages': {
-                'rotation_under_1deg': float(rot_1deg) if rotation_errors else None,
-                'rotation_under_2deg': float(rot_2deg) if rotation_errors else None,
-                'rotation_under_5deg': float(rot_5deg) if rotation_errors else None,
-                'translation_under_5deg': float(trans_5deg) if rotation_errors else None,
-                'translation_under_10deg': float(trans_10deg) if rotation_errors else None,
-                'translation_under_15deg': float(trans_15deg) if rotation_errors else None,
-                'combined_strict': float(success_strict) if rotation_errors else None,
-                'combined_normal': float(success_normal) if rotation_errors else None,
-                'combined_relaxed': float(success_relaxed) if rotation_errors else None,
+                'rotation_under_1deg': float(rot_1deg) if rotation_errors else 0.0,
+                'rotation_under_2deg': float(rot_2deg) if rotation_errors else 0.0,
+                'rotation_under_5deg': float(rot_5deg) if rotation_errors else 0.0,
+                'translation_under_5deg': float(trans_5deg) if rotation_errors else 0.0,
+                'translation_under_10deg': float(trans_10deg) if rotation_errors else 0.0,
+                'translation_under_15deg': float(trans_15deg) if rotation_errors else 0.0,
+                'combined_strict': float(success_strict) if rotation_errors else 0.0,
+                'combined_normal': float(success_normal) if rotation_errors else 0.0,
+                'combined_relaxed': float(success_relaxed) if rotation_errors else 0.0,
             }
         },
         'per_pair_results': results

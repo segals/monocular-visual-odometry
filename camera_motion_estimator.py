@@ -43,13 +43,13 @@ ORB_PATCH_SIZE = 31            # Descriptor patch size
 ORB_FAST_THRESHOLD = 20        # FAST corner threshold
 
 # Matching Parameters
-RATIO_TEST_THRESHOLD = 0.70    # Lowe's ratio test (conservative)
-MAX_HAMMING_DISTANCE = 64      # Maximum acceptable Hamming distance
+RATIO_TEST_THRESHOLD = 0.6     # Lowe's ratio test - sweet spot
+MAX_HAMMING_DISTANCE = 45      # Maximum acceptable Hamming distance
 
 # RANSAC Parameters (optimized for accuracy)
 RANSAC_CONFIDENCE = 0.9999     # Very high confidence
-RANSAC_THRESHOLD = 1.0         # Strict inlier threshold (pixels)
-RANSAC_MAX_ITERS = 10000       # Very high iteration count for accuracy
+RANSAC_THRESHOLD = 0.75        # Strict inlier threshold (pixels)
+RANSAC_MAX_ITERS = 15000       # Very high iteration count for accuracy
 
 # Use USAC (Universal RANSAC) if available - much better than regular RANSAC
 # USAC methods: USAC_DEFAULT, USAC_PARALLEL, USAC_FM_8PTS, USAC_FAST, USAC_ACCURATE, USAC_PROSAC, USAC_MAGSAC
@@ -57,7 +57,7 @@ USE_USAC = True
 USAC_METHOD = cv2.USAC_MAGSAC if hasattr(cv2, 'USAC_MAGSAC') else cv2.USAC_DEFAULT if hasattr(cv2, 'USAC_DEFAULT') else None
 
 # Essential matrix estimation parameters
-ESSENTIAL_THRESHOLD = 1.0      # Threshold for essential matrix estimation
+ESSENTIAL_THRESHOLD = 0.75     # Threshold for essential matrix estimation
 
 # Quality Thresholds
 MIN_FEATURES_WARNING = 100     # Warn if fewer features detected
@@ -489,16 +489,24 @@ class GeometryEstimator:
                 )
                 
             if F is None or F.shape != (3, 3):
-                # Further fallback: LMEDS (Least Median of Squares) - no threshold needed
+                # Further fallback: LMEDS (Least Median of Squares)
                 F, mask = cv2.findFundamentalMat(
                     pts1, pts2,
                     method=cv2.FM_LMEDS,
-                    confidence=0.99
+                    ransacReprojThreshold=1.0,
+                    confidence=0.99,
+                    maxIters=5000
                 )
                 
             if F is None or F.shape != (3, 3):
                 # Last resort: 8-point algorithm
-                F, mask = cv2.findFundamentalMat(pts1, pts2, method=cv2.FM_8POINT)
+                F, mask = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=cv2.FM_8POINT,
+                    ransacReprojThreshold=1.0,
+                    confidence=0.99,
+                    maxIters=1000
+                )
                 if mask is None:
                     mask = np.ones((len(pts1), 1), dtype=np.uint8)
                     
@@ -521,7 +529,6 @@ class GeometryEstimator:
     def estimate_essential_matrix_direct(self, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[Optional[np.ndarray], np.ndarray]:
         """
         Estimate essential matrix directly using calibrated points.
-        This is more accurate than computing E from F.
         Returns E and inlier mask.
         """
         # Minimum points check
@@ -535,40 +542,45 @@ class GeometryEstimator:
             return None, np.zeros((len(pts1), 1), dtype=np.uint8)
         
         try:
-            # Try USAC first
+            # Primary method: USAC_MAGSAC (best accuracy)
             if USE_USAC and USAC_METHOD is not None:
                 E, mask = cv2.findEssentialMat(
                     pts1, pts2, self.K,
                     method=USAC_METHOD,
                     prob=RANSAC_CONFIDENCE,
-                    threshold=ESSENTIAL_THRESHOLD,
-                    maxIters=RANSAC_MAX_ITERS
+                    threshold=ESSENTIAL_THRESHOLD
                 )
-            else:
-                E, mask = cv2.findEssentialMat(
-                    pts1, pts2, self.K,
-                    method=cv2.RANSAC,
-                    prob=RANSAC_CONFIDENCE,
-                    threshold=ESSENTIAL_THRESHOLD,
-                    maxIters=RANSAC_MAX_ITERS
-                )
+                
+                if E is not None and E.shape == (3, 3) and mask is not None:
+                    E = self.enforce_essential_constraints(E)
+                    return E, mask
             
-            if E is None or E.shape != (3, 3):
-                # Fallback to LMEDS
-                E, mask = cv2.findEssentialMat(
-                    pts1, pts2, self.K,
-                    method=cv2.LMEDS,
-                    prob=0.999
-                )
+            # Fallback: Standard RANSAC
+            E, mask = cv2.findEssentialMat(
+                pts1, pts2, self.K,
+                method=cv2.RANSAC,
+                prob=RANSAC_CONFIDENCE,
+                threshold=ESSENTIAL_THRESHOLD
+            )
             
-            if E is None:
-                return None, np.zeros((len(pts1), 1), dtype=np.uint8)
+            if E is not None and E.shape == (3, 3) and mask is not None:
+                E = self.enforce_essential_constraints(E)
+                return E, mask
             
-            if mask is None:
-                mask = np.ones((len(pts1), 1), dtype=np.uint8)
+            # Last fallback: LMEDS
+            E, mask = cv2.findEssentialMat(
+                pts1, pts2, self.K,
+                method=cv2.LMEDS,
+                prob=0.999
+            )
             
-            # Enforce essential matrix constraints
-            E = self.enforce_essential_constraints(E)
+            if E is not None:
+                E = self.enforce_essential_constraints(E)
+                if mask is None:
+                    mask = np.ones((len(pts1), 1), dtype=np.uint8)
+                return E, mask
+            
+            return None, np.zeros((len(pts1), 1), dtype=np.uint8)
                 
         except cv2.error:
             return None, np.zeros((len(pts1), 1), dtype=np.uint8)
@@ -673,6 +685,46 @@ class GeometryEstimator:
         
         return best_R, best_t, best_count
     
+    def check_homography_degeneracy(self, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[bool, float]:
+        """
+        Check if the scene is degenerate (planar or nearly planar).
+        If homography fits well compared to fundamental matrix, translation is unreliable.
+        
+        Returns: (is_degenerate, homography_ratio)
+        """
+        if len(pts1) < 10:
+            return False, 0.0
+        
+        try:
+            # Estimate homography
+            H, mask_H = cv2.findHomography(pts1, pts2, cv2.RANSAC, 3.0)
+            if H is None or mask_H is None:
+                return False, 0.0
+            
+            # Estimate fundamental matrix
+            F, mask_F = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 1.0, 0.99)
+            if F is None or mask_F is None:
+                return False, 0.0
+            
+            # Count inliers for each
+            h_inliers = np.sum(mask_H)
+            f_inliers = np.sum(mask_F)
+            
+            # Compute homography ratio
+            if f_inliers > 0:
+                ratio = h_inliers / f_inliers
+            else:
+                ratio = 1.0
+            
+            # If homography explains points almost as well as fundamental matrix,
+            # the scene is likely planar and translation direction is unreliable
+            is_degenerate = ratio > 0.85 and h_inliers > len(pts1) * 0.6
+            
+            return is_degenerate, ratio
+            
+        except Exception:
+            return False, 0.0
+    
     def _count_points_in_front(self, R: np.ndarray, t: np.ndarray, 
                                 pts1: np.ndarray, pts2: np.ndarray) -> int:
         """
@@ -699,10 +751,113 @@ class GeometryEstimator:
         except:
             return 0
     
+    def _evaluate_pose_quality(self, R: np.ndarray, t: np.ndarray, 
+                               pts1: np.ndarray, pts2: np.ndarray) -> Tuple[int, float, float]:
+        """
+        Comprehensive pose quality evaluation using:
+        1. Cheirality (points in front of both cameras)
+        2. Parallax angle (critical for translation accuracy)
+        3. Reprojection error
+        4. Depth consistency
+        
+        Returns: (num_valid, mean_reproj_error, depth_std_ratio)
+        """
+        try:
+            P1 = self.K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+            P2 = self.K @ np.hstack([R, t])
+            
+            pts1_h = pts1.T
+            pts2_h = pts2.T
+            
+            # Triangulate
+            points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
+            points_3d = points_4d[:3] / (points_4d[3:] + 1e-10)
+            
+            # Check z > 0 in camera 1 (with margin to avoid numerical issues)
+            in_front_1 = points_3d[2, :] > 0.01
+            
+            # Transform to camera 2 and check z > 0
+            points_cam2 = R @ points_3d + t
+            in_front_2 = points_cam2[2, :] > 0.01
+            
+            # Also check for reasonable depth (not too far, not too close)
+            reasonable_depth = (points_3d[2, :] > 0.1) & (points_3d[2, :] < 1000)
+            
+            valid_mask = in_front_1 & in_front_2 & reasonable_depth
+            num_valid = int(np.sum(valid_mask))
+            
+            if num_valid < 5:
+                return num_valid, float('inf'), float('inf')
+            
+            # Compute reprojection error for valid points
+            valid_3d = points_3d[:, valid_mask]
+            valid_pts1 = pts1[valid_mask]
+            valid_pts2 = pts2[valid_mask]
+            
+            # Project back to image 1
+            proj1 = P1 @ np.vstack([valid_3d, np.ones((1, valid_3d.shape[1]))])
+            proj1 = proj1[:2] / (proj1[2:] + 1e-10)
+            
+            # Project back to image 2
+            proj2 = P2 @ np.vstack([valid_3d, np.ones((1, valid_3d.shape[1]))])
+            proj2 = proj2[:2] / (proj2[2:] + 1e-10)
+            
+            # Compute errors
+            err1 = np.sqrt(np.sum((proj1.T - valid_pts1)**2, axis=1))
+            err2 = np.sqrt(np.sum((proj2.T - valid_pts2)**2, axis=1))
+            
+            # Filter out outlier reprojection errors
+            all_errs = np.concatenate([err1, err2])
+            median_err = np.median(all_errs)
+            good_errs = all_errs[all_errs < median_err * 3]
+            mean_reproj = float(np.mean(good_errs)) if len(good_errs) > 0 else float(np.mean(all_errs))
+            
+            # Depth consistency: ratio of std to mean depth (lower is better)
+            depths = valid_3d[2, :]
+            if np.mean(depths) > 1e-6:
+                depth_consistency = float(np.std(depths) / np.mean(depths))
+            else:
+                depth_consistency = float('inf')
+            
+            # Compute parallax angles - critical for translation accuracy
+            # Camera center 1 is at origin, camera center 2 is at -R.T @ t
+            C2 = -R.T @ t.flatten()
+            
+            parallax_angles = []
+            for i in range(valid_3d.shape[1]):
+                p = valid_3d[:, i]
+                # Ray from camera 1 to point
+                ray1 = p / (np.linalg.norm(p) + 1e-10)
+                # Ray from camera 2 to point  
+                ray2 = (p - C2) / (np.linalg.norm(p - C2) + 1e-10)
+                # Parallax angle
+                cos_angle = np.clip(np.dot(ray1, ray2), -1, 1)
+                parallax_angles.append(np.arccos(cos_angle))
+            
+            mean_parallax = np.mean(parallax_angles)
+            median_parallax = np.median(parallax_angles)
+            
+            # Use median parallax for robustness against outliers
+            # Parallax below ~1 degree means translation is poorly constrained
+            # But we don't want to over-penalize or we might select wrong solution
+            parallax_factor = 1.0
+            if median_parallax < np.radians(0.5):
+                parallax_factor = 2.0  # Increase error weight for very low parallax
+            elif median_parallax < np.radians(1.0):
+                parallax_factor = 1.5
+            
+            # Apply parallax factor to reprojection error (makes it less reliable metric)
+            adjusted_reproj = mean_reproj * parallax_factor
+            
+            return num_valid, adjusted_reproj, depth_consistency
+            
+        except Exception:
+            return 0, float('inf'), float('inf')
+    
     def refine_pose_with_all_solutions(self, E: np.ndarray, pts1: np.ndarray, pts2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
         """
-        Try all four decomposition solutions and pick the best one based on
-        cheirality check AND reprojection error.
+        Try all four decomposition solutions and pick the best one using
+        comprehensive quality metrics: cheirality, reprojection error, depth consistency.
         """
         if len(pts1) < 5 or len(pts2) < 5:
             return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
@@ -725,7 +880,7 @@ class GeometryEstimator:
             R2 = U @ W.T @ Vt
             t_base = U[:, 2:3]
             
-            # Evaluate all four solutions
+            # Evaluate all four solutions with comprehensive quality metrics
             candidates = []
             for R in [R1, R2]:
                 # Ensure R is valid rotation
@@ -735,28 +890,204 @@ class GeometryEstimator:
                 for sign in [1, -1]:
                     t = sign * t_base
                     
-                    # Count points in front
-                    count = self._count_points_in_front(R, t, pts1, pts2)
+                    # Comprehensive evaluation
+                    num_valid, reproj_err, depth_consistency = self._evaluate_pose_quality(
+                        R, t, pts1, pts2
+                    )
                     
-                    # Compute reprojection error for valid points
-                    if count > len(pts1) * 0.5:  # At least 50% of points in front
-                        reproj_err = self.compute_reprojection_error(R, t, pts1, pts2)
-                        median_err = np.median(reproj_err) if len(reproj_err) > 0 else float('inf')
+                    # Score: prioritize num_valid, then reproj_err
+                    if num_valid >= len(pts1) * 0.2:  # At least 20% valid
+                        score = (num_valid, -reproj_err, -depth_consistency)
                     else:
-                        median_err = float('inf')
+                        score = (num_valid, -float('inf'), -float('inf'))
                     
-                    candidates.append((R, t, count, median_err))
+                    candidates.append((R, t.copy(), num_valid, reproj_err, depth_consistency, score))
             
-            # Pick the best: most points in front, then lowest reprojection error
-            candidates.sort(key=lambda x: (-x[2], x[3]))
+            # Sort by score (descending)
+            candidates.sort(key=lambda x: x[5], reverse=True)
             
-            if candidates and candidates[0][2] > 0:
-                return candidates[0][0], candidates[0][1], candidates[0][2]
+            if not candidates or candidates[0][2] == 0:
+                return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
+            
+            best = candidates[0]
+            R_best, t_best = best[0], best[1]
+            best_num = best[2]
+            
+            # Check if there's ambiguity between top 2 solutions
+            if len(candidates) >= 2:
+                second = candidates[1]
+                # If second solution has similar quality, we need to be careful
+                if second[2] >= best[2] * 0.85 and second[3] < best[3] * 1.5:
+                    # Use flow-based estimation to break tie
+                    t_flow = self.estimate_translation_from_flow(pts1, pts2, R_best)
+                    if t_flow is not None:
+                        t1_norm = t_best.flatten() / (np.linalg.norm(t_best) + 1e-10)
+                        t2_norm = second[1].flatten() / (np.linalg.norm(second[1]) + 1e-10)
+                        t_flow_norm = t_flow.flatten() / (np.linalg.norm(t_flow) + 1e-10)
+                        
+                        # Pick translation closer to flow estimate
+                        dot1 = abs(np.dot(t1_norm, t_flow_norm))
+                        dot2 = abs(np.dot(t2_norm, t_flow_norm))
+                        
+                        if dot2 > dot1 + 0.1:  # Second is significantly closer to flow
+                            t_best = second[1]
+                            best_num = second[2]
+            
+            # Refine translation direction with finer local optimization
+            t_refined = self._refine_translation_direction(R_best, t_best, pts1, pts2)
+            
+            # Validate refinement improved things
+            num_refined, err_refined, _ = self._evaluate_pose_quality(R_best, t_refined, pts1, pts2)
+            num_orig, err_orig, _ = self._evaluate_pose_quality(R_best, t_best, pts1, pts2)
+            
+            # Only use refinement if it clearly improved things
+            if err_refined > err_orig * 1.2 or num_refined < num_orig * 0.8:
+                t_refined = t_best
+            else:
+                best_num = max(best_num, num_refined)
+                
+            return R_best, t_refined, best_num
             
         except Exception as e:
             pass
         
         return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
+    
+    def _refine_translation_direction(self, R: np.ndarray, t_init: np.ndarray, 
+                                       pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
+        """
+        Refine translation direction by minimizing reprojection error
+        while keeping rotation fixed. Does coarse-to-fine local search.
+        """
+        t = t_init.flatten()
+        t = t / (np.linalg.norm(t) + 1e-10)  # Normalize
+        
+        # Convert to spherical coordinates
+        theta = np.arctan2(t[1], t[0])
+        phi = np.arccos(np.clip(t[2], -1, 1))
+        
+        best_t = t_init.copy()
+        _, best_err, _ = self._evaluate_pose_quality(R, t_init, pts1, pts2)
+        
+        # Local refinement with coarse-to-fine search (finer grid for better accuracy)
+        for scale in [0.2, 0.1, 0.05, 0.02, 0.01]:
+            for d_theta in np.linspace(-scale, scale, 5):
+                for d_phi in np.linspace(-scale, scale, 5):
+                    new_theta = theta + d_theta
+                    new_phi = np.clip(phi + d_phi, 0.01, np.pi - 0.01)
+                    
+                    new_t = np.array([
+                        np.sin(new_phi) * np.cos(new_theta),
+                        np.sin(new_phi) * np.sin(new_theta),
+                        np.cos(new_phi)
+                    ]).reshape(3, 1)
+                    
+                    _, err, _ = self._evaluate_pose_quality(R, new_t, pts1, pts2)
+                    
+                    if err < best_err:
+                        best_err = err
+                        best_t = new_t.copy()
+                        theta = new_theta
+                        phi = new_phi
+        
+        return best_t
+    
+    def estimate_translation_from_flow(self, pts1: np.ndarray, pts2: np.ndarray, 
+                                        R: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Estimate translation direction from optical flow pattern after removing rotation.
+        Uses a robust median-based approach to find the focus of expansion.
+        """
+        if len(pts1) < 20:
+            return None
+        
+        try:
+            # Convert to normalized coordinates
+            pts1_norm = (self.K_inv @ np.hstack([pts1, np.ones((len(pts1), 1))]).T).T[:, :2]
+            pts2_norm = (self.K_inv @ np.hstack([pts2, np.ones((len(pts2), 1))]).T).T[:, :2]
+            
+            # Remove rotation from the flow by rotating pts1 with R
+            pts1_h = np.hstack([pts1_norm, np.ones((len(pts1_norm), 1))])
+            pts1_rotated = (R.T @ pts1_h.T).T[:, :2]
+            
+            # Flow after rotation removal - should be radial from/to FOE
+            flow = pts2_norm - pts1_rotated
+            flow_mag = np.linalg.norm(flow, axis=1)
+            
+            # Filter out very small flows (might be noise)
+            valid = flow_mag > 1e-4
+            if np.sum(valid) < 10:
+                return None
+            
+            pts_valid = pts2_norm[valid]
+            flow_valid = flow[valid]
+            flow_mag_valid = flow_mag[valid]
+            
+            # Normalize flow directions
+            flow_dirs = flow_valid / (flow_mag_valid.reshape(-1, 1) + 1e-10)
+            
+            # For forward motion, FOE is in the direction the flow radiates from
+            # Estimate FOE using weighted median of flow line intersections
+            # Each point + flow direction defines a line; FOE is where they intersect
+            
+            # Use RANSAC-like approach: sample pairs and find intersection
+            n_pts = len(pts_valid)
+            if n_pts < 10:
+                return None
+            
+            foe_candidates = []
+            n_samples = min(50, n_pts * (n_pts - 1) // 2)
+            
+            for _ in range(n_samples):
+                i, j = np.random.choice(n_pts, 2, replace=False)
+                
+                # Two lines: p_i + t * d_i and p_j + s * d_j
+                p1, d1 = pts_valid[i], flow_dirs[i]
+                p2, d2 = pts_valid[j], flow_dirs[j]
+                
+                # Solve for intersection using least squares
+                # p1 + t*d1 = p2 + s*d2
+                # [d1, -d2] * [t, s]^T = p2 - p1
+                A = np.column_stack([d1, -d2])
+                b = p2 - p1
+                
+                try:
+                    if abs(np.linalg.det(A)) > 1e-6:
+                        ts = np.linalg.solve(A, b)
+                        foe = p1 + ts[0] * d1
+                        foe_candidates.append(foe)
+                except:
+                    continue
+            
+            if len(foe_candidates) < 5:
+                # Fallback: use weighted average flow direction
+                # Weight by flow magnitude (stronger flow = more reliable)
+                weights = flow_mag_valid / (np.sum(flow_mag_valid) + 1e-10)
+                avg_flow = np.sum(flow_valid * weights.reshape(-1, 1), axis=0)
+                t_approx = np.array([-avg_flow[0], -avg_flow[1], 1.0])
+            else:
+                # Use robust median with outlier rejection
+                foe_array = np.array(foe_candidates)
+                
+                # Remove outliers using MAD
+                foe_median_init = np.median(foe_array, axis=0)
+                distances = np.linalg.norm(foe_array - foe_median_init, axis=1)
+                mad = np.median(distances)
+                inliers = distances < mad * 3  # 3 MAD threshold
+                
+                if np.sum(inliers) >= 3:
+                    foe_median = np.median(foe_array[inliers], axis=0)
+                else:
+                    foe_median = foe_median_init
+                
+                # Translation points towards FOE (for forward motion)
+                t_approx = np.array([foe_median[0], foe_median[1], 1.0])
+            
+            t_approx = t_approx / (np.linalg.norm(t_approx) + 1e-10)
+            return t_approx.reshape(3, 1)
+            
+        except Exception:
+            return None
     
     def compute_sampson_error(self, F: np.ndarray, pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
         """
@@ -983,6 +1314,20 @@ class CameraMotionEstimator:
         # Extract point coordinates
         pts1, pts2 = self.feature_processor.extract_matched_points(kp1, kp2, filtered_matches)
         
+        # Compute motion magnitude (average optical flow)
+        flow = pts2 - pts1
+        flow_magnitudes = np.linalg.norm(flow, axis=1)
+        mean_flow = np.mean(flow_magnitudes)
+        median_flow = np.median(flow_magnitudes)
+        
+        print(f"  Average optical flow: {mean_flow:.2f} px (median: {median_flow:.2f} px)")
+        
+        # Flag for small motion (translation direction may be unreliable)
+        small_motion = median_flow < 3.0  # Less than 3 pixels median displacement
+        if small_motion:
+            print("  [WARNING] Small motion detected - translation direction may be less reliable")
+            metrics.warnings.append("Small camera motion detected")
+        
         # ---------------------------------------------------------------------
         # Stage 4: Essential Matrix Estimation (Direct Method with USAC)
         # ---------------------------------------------------------------------
@@ -1014,6 +1359,53 @@ class CameraMotionEstimator:
         inlier_mask = inlier_mask.ravel().astype(bool)
         inlier_pts1 = pts1[inlier_mask]
         inlier_pts2 = pts2[inlier_mask]
+        
+        # Secondary epipolar filtering - remove any remaining outliers
+        # using Sampson error threshold
+        if len(inlier_pts1) > MIN_INLIERS_CRITICAL:
+            F_temp = self.geometry_estimator.K_inv.T @ E @ self.geometry_estimator.K_inv if E is not None else F
+            sampson_errs = self.geometry_estimator.compute_sampson_error(F_temp, inlier_pts1, inlier_pts2)
+            
+            # Use adaptive threshold based on median absolute deviation
+            median_err = np.median(sampson_errs)
+            mad = np.median(np.abs(sampson_errs - median_err))
+            threshold = median_err + 3.0 * mad * 1.4826  # 1.4826 converts MAD to std
+            threshold = max(threshold, 1.5)  # Minimum threshold
+            
+            epipolar_good = sampson_errs < threshold
+            if np.sum(epipolar_good) >= MIN_INLIERS_CRITICAL:
+                inlier_pts1 = inlier_pts1[epipolar_good]
+                inlier_pts2 = inlier_pts2[epipolar_good]
+                print(f"  After epipolar refinement: {len(inlier_pts1)} points")
+        
+        # Apply cv2.correctMatches for sub-pixel refinement
+        # This optimally triangulates points by adjusting them to satisfy epipolar constraint
+        if len(inlier_pts1) >= MIN_INLIERS_CRITICAL and F is not None:
+            try:
+                pts1_refined, pts2_refined = cv2.correctMatches(
+                    F, 
+                    inlier_pts1.reshape(1, -1, 2),
+                    inlier_pts2.reshape(1, -1, 2)
+                )
+                if pts1_refined is not None and pts2_refined is not None:
+                    inlier_pts1 = pts1_refined.reshape(-1, 2)
+                    inlier_pts2 = pts2_refined.reshape(-1, 2)
+                    print(f"  Applied optimal triangulation correction")
+            except cv2.error:
+                pass  # Keep original points if correction fails
+        
+        # Re-estimate Essential matrix using cleaned inliers for more accuracy
+        if len(inlier_pts1) >= 20:
+            E_refined, mask_refined = self.geometry_estimator.estimate_essential_matrix_direct(
+                inlier_pts1, inlier_pts2
+            )
+            if E_refined is not None and np.sum(mask_refined) >= MIN_INLIERS_CRITICAL:
+                E = E_refined
+                # Apply refined mask
+                mask_refined = mask_refined.ravel().astype(bool)
+                inlier_pts1 = inlier_pts1[mask_refined]
+                inlier_pts2 = inlier_pts2[mask_refined]
+                print(f"  Re-estimated E with {len(inlier_pts1)} cleaned inliers")
         
         metrics.ransac_inliers = len(inlier_pts1)
         metrics.inlier_ratio = len(inlier_pts1) / len(pts1) if len(pts1) > 0 else 0
@@ -1051,28 +1443,73 @@ class CameraMotionEstimator:
         metrics.essential_matrix_condition = S[0] / (S[1] + 1e-10)
         
         # ---------------------------------------------------------------------
-        # Stage 6: Motion Decomposition with Refinement
+        # Stage 6: Motion Decomposition with Comprehensive Pose Selection
         # ---------------------------------------------------------------------
-        print("\n[Stage 6] Motion Decomposition (R, t) with Refinement...")
+        print("\n[Stage 6] Motion Decomposition (R, t) with Comprehensive Selection...")
         
-        # First try OpenCV's recoverPose
-        R, t, num_positive = self.geometry_estimator.decompose_essential_matrix(
+        # ALWAYS use comprehensive pose selection with triangulation quality
+        # This evaluates all 4 solutions and picks the one with:
+        # 1. Maximum points with positive depth
+        # 2. Minimum reprojection error
+        # 3. Best depth consistency
+        R, t, num_positive = self.geometry_estimator.refine_pose_with_all_solutions(
             E, inlier_pts1, inlier_pts2
         )
         
-        # If cheirality is poor, try refined pose selection
-        cheirality_ratio = num_positive / len(inlier_pts1) if len(inlier_pts1) > 0 else 0
-        if cheirality_ratio < 0.7:
-            print("  Low cheirality ratio, trying refined pose selection...")
-            R_refined, t_refined, num_refined = self.geometry_estimator.refine_pose_with_all_solutions(
-                E, inlier_pts1, inlier_pts2
-            )
-            if num_refined > num_positive:
-                R, t, num_positive = R_refined, t_refined, num_refined
-                print(f"  Refined pose selected with {num_positive} points in front")
+        # Verify with OpenCV's recoverPose as sanity check
+        R_cv, t_cv, num_cv = self.geometry_estimator.decompose_essential_matrix(
+            E, inlier_pts1, inlier_pts2
+        )
+        
+        # Compare results - take the better one
+        if num_cv > num_positive:
+            # OpenCV got more positive depth points
+            qual_cv = self.geometry_estimator._evaluate_pose_quality(R_cv, t_cv, inlier_pts1, inlier_pts2)
+            qual_ours = self.geometry_estimator._evaluate_pose_quality(R, t, inlier_pts1, inlier_pts2)
+            
+            # Compare using comprehensive quality: (num_valid, -reproj_err, -depth_consistency)
+            score_cv = (qual_cv[0], -qual_cv[1], -qual_cv[2])
+            score_ours = (qual_ours[0], -qual_ours[1], -qual_ours[2])
+            
+            if score_cv > score_ours:
+                R, t, num_positive = R_cv, t_cv, num_cv
+                print(f"  Using OpenCV pose (better quality)")
+            else:
+                print(f"  Keeping refined pose (better quality)")
+        
+        # ---------------------------------------------------------------------
+        # Stage 6b: Translation Validation using Flow-Based Cross-Check
+        # ---------------------------------------------------------------------
+        t_flow = self.geometry_estimator.estimate_translation_from_flow(inlier_pts1, inlier_pts2, R)
+        if t_flow is not None:
+            # Check consistency between Essential matrix translation and flow-based
+            t_flat = t.flatten()
+            t_flow_flat = t_flow.flatten()
+            
+            # Cosine similarity - should be high if consistent
+            cos_sim = abs(np.dot(t_flat, t_flow_flat) / (np.linalg.norm(t_flat) * np.linalg.norm(t_flow_flat) + 1e-10))
+            
+            print(f"  Translation validation: E-based vs flow-based cos_sim = {cos_sim:.4f}")
+            
+            # If low consistency, try negating translation (sign ambiguity)
+            if cos_sim < 0.7:
+                t_neg = -t
+                cos_sim_neg = abs(np.dot(t_neg.flatten(), t_flow_flat) / 
+                                 (np.linalg.norm(t_neg) * np.linalg.norm(t_flow_flat) + 1e-10))
+                
+                if cos_sim_neg > cos_sim:
+                    # Negated translation matches flow better - check cheirality
+                    num_neg = self.geometry_estimator._count_points_in_front(R, t_neg, inlier_pts1, inlier_pts2)
+                    if num_neg >= num_positive * 0.9:  # Strict cheirality requirement
+                        print(f"  Flipping translation sign (cos_sim: {cos_sim:.3f} -> {cos_sim_neg:.3f}, cheirality OK)")
+                        t = t_neg
+                        num_positive = num_neg
+                    else:
+                        print(f"  Translation flip rejected (cheirality failed: {num_neg} < {num_positive*0.9:.0f})")
         
         metrics.cheirality_positive_ratio = num_positive / len(inlier_pts1) if len(inlier_pts1) > 0 else 0
         print(f"  Cheirality check: {num_positive}/{len(inlier_pts1)} points in front ({metrics.cheirality_positive_ratio*100:.1f}%)")
+        
         
         # Verify rotation matrix
         det_R = np.linalg.det(R)
