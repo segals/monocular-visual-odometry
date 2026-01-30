@@ -63,7 +63,7 @@ def load_calibration(calib_path: str) -> tuple:
 
 
 def preprocess_image(image_path: str, K: np.ndarray, dist: np.ndarray,
-                     orig_w: int, orig_h: int) -> tuple:
+                     orig_w: int, orig_h: int, preserve_aspect: bool = False) -> tuple:
     """Load and preprocess image for feature detection."""
     # Load image
     img = cv2.imread(image_path)
@@ -72,9 +72,19 @@ def preprocess_image(image_path: str, K: np.ndarray, dist: np.ndarray,
     
     h, w = img.shape[:2]
     
-    # Calculate downsampling scale (force exact target dimensions for Tello)
-    scale_x = TARGET_WIDTH / w
-    scale_y = TARGET_HEIGHT / h
+    # Calculate downsampling scale
+    if preserve_aspect:
+        # Maintain aspect ratio - scale to fit within target dimensions
+        scale = min(TARGET_WIDTH / w, TARGET_HEIGHT / h)
+        scale_x = scale_y = scale
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+    else:
+        # Force exact target dimensions (Tello mode)
+        scale_x = TARGET_WIDTH / w
+        scale_y = TARGET_HEIGHT / h
+        new_w = TARGET_WIDTH
+        new_h = TARGET_HEIGHT
     
     # Apply anti-aliasing blur before downsampling
     if scale_x < 1.0 or scale_y < 1.0:
@@ -83,7 +93,7 @@ def preprocess_image(image_path: str, K: np.ndarray, dist: np.ndarray,
             img = cv2.GaussianBlur(img, (blur_size, blur_size), 0)
     
     # Downsample
-    img = cv2.resize(img, (TARGET_WIDTH, TARGET_HEIGHT), interpolation=cv2.INTER_AREA)
+    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
     # Convert to grayscale
     if len(img.shape) == 3:
@@ -194,6 +204,8 @@ Examples:
     parser.add_argument('calibration', type=str, help='Path to calibration JSON file')
     parser.add_argument('--json', action='store_true', help='Output as JSON')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    parser.add_argument('--preserve-aspect', '-p', action='store_true', 
+                        help='Preserve aspect ratio (use for non-Tello cameras like KITTI)')
     
     args = parser.parse_args()
     
@@ -206,8 +218,8 @@ Examples:
             print(f"  Original resolution: {orig_w}x{orig_h}", file=sys.stderr)
         
         # Preprocess images
-        img1, K_scaled = preprocess_image(args.image1, K, dist, orig_w, orig_h)
-        img2, _ = preprocess_image(args.image2, K, dist, orig_w, orig_h)
+        img1, K_scaled = preprocess_image(args.image1, K, dist, orig_w, orig_h, args.preserve_aspect)
+        img2, _ = preprocess_image(args.image2, K, dist, orig_w, orig_h, args.preserve_aspect)
         
         if args.verbose:
             print(f"Preprocessed images to {TARGET_WIDTH}x{TARGET_HEIGHT}", file=sys.stderr)
