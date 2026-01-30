@@ -1,0 +1,234 @@
+{
+  "kitti_sequence": "00",
+  "num_pairs_evaluated": 20,
+  "calibration_file": "kitti_odometry\\sequences\\00\\calibration.json",
+  "summary": {
+    "rotation_error": {
+      "mean": 0.5640791389041288,
+      "median": 0.38893260176828004,
+      "std": 0.6511870059953382,
+      "min": 0.09996875392321866,
+      "max": 3.0614100661769994
+    },
+    "translation_error": {
+      "mean": 9.521591503354973,
+      "median": 3.3206009948656288,
+      "std": 14.48185326133465,
+      "min": 0.6960110943014683,
+      "max": 52.86935391923451
+    },
+    "accuracy_percentages": {
+      "rotation_under_1deg": 90.0,
+      "rotation_under_2deg": 95.0,
+      "rotation_under_5deg": 100.0,
+      "translation_under_5deg": 75.0,
+      "translation_under_10deg": 75.0,
+      "translation_under_15deg": 85.0,
+      "combined_strict": 75.0,
+      "combined_normal": 85.0,
+      "combined_relaxed": 90.0
+    }
+  },
+  "per_pair_results": [
+    {
+      "pair": 0,
+      "idx1": 0,
+      "idx2": 1,
+      "quality_score": 100.0,
+      "inliers": 812,
+      "reprojection_error": 7.247989665468452e-06,
+      "rotation_error_deg": 0.38534498972024966,
+      "translation_error_deg": 3.74510061321223
+    },
+    {
+      "pair": 1,
+      "idx1": 1,
+      "idx2": 2,
+      "quality_score": 100.0,
+      "inliers": 731,
+      "reprojection_error": 2.0471891488469516e-05,
+      "rotation_error_deg": 0.28063377240127324,
+      "translation_error_deg": 10.948398463635641
+    },
+    {
+      "pair": 2,
+      "idx1": 2,
+      "idx2": 3,
+      "quality_score": 100.0,
+      "inliers": 717,
+      "reprojection_error": 5.635009240943361e-06,
+      "rotation_error_deg": 0.09996875392321866,
+      "translation_error_deg": 12.16429622825919
+    },
+    {
+      "pair": 3,
+      "idx1": 3,
+      "idx2": 4,
+      "quality_score": 100.0,
+      "inliers": 798,
+      "reprojection_error": 1.936703931288821e-05,
+      "rotation_error_deg": 0.4124776036927811,
+      "translation_error_deg": 2.2221957463538047
+    },
+    {
+      "pair": 4,
+      "idx1": 4,
+      "idx2": 5,
+      "quality_score": 100.0,
+      "inliers": 725,
+      "reprojection_error": 6.475581227827908e-06,
+      "rotation_error_deg": 0.41627938886723914,
+      "translation_error_deg": 4.538910791065604
+    },
+    {
+      "pair": 5,
+      "idx1": 5,
+      "idx2": 6,
+      "quality_score": 100.0,
+      "inliers": 696,
+      "reprojection_error": 9.774227743878923e-06,
+      "rotation_error_deg": 3.0614100661769994,
+      "translation_error_deg": 52.86935391923451
+    },
+    {
+      "pair": 6,
+      "idx1": 6,
+      "idx2": 7,
+      "quality_score": 100.0,
+      "inliers": 730,
+      "reprojection_error": 8.423059588958724e-06,
+      "rotation_error_deg": 0.4666545126833589,
+      "translation_error_deg": 3.0562825271899214
+    },
+    {
+      "pair": 7,
+      "idx1": 7,
+      "idx2": 8,
+      "quality_score": 100.0,
+      "inliers": 666,
+      "reprojection_error": 5.86256484191412e-05,
+      "rotation_error_deg": 0.39252021381631047,
+      "translation_error_deg": 3.579691154482532
+    },
+    {
+      "pair": 8,
+      "idx1": 8,
+      "idx2": 9,
+      "quality_score": 100.0,
+      "inliers": 635,
+      "reprojection_error": 3.6181519631334724e-05,
+      "rotation_error_deg": 0.4784379263594082,
+      "translation_error_deg": 4.561563726515942
+    },
+    {
+      "pair": 9,
+      "idx1": 9,
+      "idx2": 10,
+      "quality_score": 100.0,
+      "inliers": 638,
+      "reprojection_error": 3.759891560201594e-05,
+      "rotation_error_deg": 0.34695767951659684,
+      "translation_error_deg": 3.0615108352487255
+    },
+    {
+      "pair": 10,
+      "idx1": 10,
+      "idx2": 11,
+      "quality_score": 100.0,
+      "inliers": 675,
+      "reprojection_error": 6.270844499983452e-06,
+      "rotation_error_deg": 0.35331200068195295,
+      "translation_error_deg": 2.5644431470477116
+    },
+    {
+      "pair": 11,
+      "idx1": 11,
+      "idx2": 12,
+      "quality_score": 100.0,
+      "inliers": 646,
+      "reprojection_error": 9.553448585223685e-06,
+      "rotation_error_deg": 0.2478855134002638,
+      "translation_error_deg": 1.6741017557611713
+    },
+    {
+      "pair": 12,
+      "idx1": 12,
+      "idx2": 13,
+      "quality_score": 100.0,
+      "inliers": 544,
+      "reprojection_error": 0.00011277620825449909,
+      "rotation_error_deg": 0.24513128567555043,
+      "translation_error_deg": 0.6960110943014683
+    },
+    {
+      "pair": 13,
+      "idx1": 13,
+      "idx2": 14,
+      "quality_score": 100.0,
+      "inliers": 504,
+      "reprojection_error": 1.1462222209681035e-05,
+      "rotation_error_deg": 1.5869886862914493,
+      "translation_error_deg": 45.12250446677916
+    },
+    {
+      "pair": 14,
+      "idx1": 14,
+      "idx2": 15,
+      "quality_score": 100.0,
+      "inliers": 583,
+      "reprojection_error": 1.2021136806875984e-05,
+      "rotation_error_deg": 0.24093389088559616,
+      "translation_error_deg": 2.2246323040017444
+    },
+    {
+      "pair": 15,
+      "idx1": 15,
+      "idx2": 16,
+      "quality_score": 100.0,
+      "inliers": 538,
+      "reprojection_error": 2.6783404690428098e-05,
+      "rotation_error_deg": 0.4389823943250462,
+      "translation_error_deg": 0.921493626200089
+    },
+    {
+      "pair": 16,
+      "idx1": 16,
+      "idx2": 17,
+      "quality_score": 100.0,
+      "inliers": 510,
+      "reprojection_error": 1.6256557332615576e-05,
+      "rotation_error_deg": 0.8966007790269604,
+      "translation_error_deg": 27.81509606526464
+    },
+    {
+      "pair": 17,
+      "idx1": 17,
+      "idx2": 18,
+      "quality_score": 100.0,
+      "inliers": 524,
+      "reprojection_error": 0.00027562708807495973,
+      "rotation_error_deg": 0.5126419175528061,
+      "translation_error_deg": 2.0985729885857722
+    },
+    {
+      "pair": 18,
+      "idx1": 18,
+      "idx2": 19,
+      "quality_score": 100.0,
+      "inliers": 486,
+      "reprojection_error": 1.9329573676990393e-05,
+      "rotation_error_deg": 0.1906307073069555,
+      "translation_error_deg": 2.4366759832284117
+    },
+    {
+      "pair": 19,
+      "idx1": 19,
+      "idx2": 20,
+      "quality_score": 100.0,
+      "inliers": 499,
+      "reprojection_error": 8.182677413234294e-06,
+      "rotation_error_deg": 0.22779069577855834,
+      "translation_error_deg": 4.130994630731209
+    }
+  ]
+}

@@ -153,9 +153,11 @@ class MotionEstimationResult:
 class ImagePreprocessor:
     """Handles image loading, enhancement, and downsampling."""
     
-    def __init__(self, target_width: int = TARGET_WIDTH, target_height: int = TARGET_HEIGHT):
+    def __init__(self, target_width: int = TARGET_WIDTH, target_height: int = TARGET_HEIGHT,
+                 preserve_aspect_ratio: bool = True):
         self.target_width = target_width
         self.target_height = target_height
+        self.preserve_aspect_ratio = preserve_aspect_ratio
         self.scale_x = 1.0
         self.scale_y = 1.0
         
@@ -173,20 +175,52 @@ class ImagePreprocessor:
         return self.scale_x, self.scale_y
     
     def downsample(self, image: np.ndarray) -> np.ndarray:
-        """Downsample image using Gaussian pyramid for anti-aliasing."""
-        h, w = image.shape[:2]
-        self.compute_scale_factors(w, h)
+        """Downsample image based on mode:
         
-        # Use INTER_AREA for downsampling (best quality)
-        # Apply slight Gaussian blur before to reduce aliasing
+        If preserve_aspect_ratio=True (default for KITTI, etc.):
+          - Keep native resolution if smaller than target
+          - Scale proportionally if larger, preserving aspect ratio
+          
+        If preserve_aspect_ratio=False (for DJI Tello with fixed calibration):
+          - Always resize to exact target dimensions
+        """
+        h, w = image.shape[:2]
+        
+        if self.preserve_aspect_ratio:
+            # Mode 1: Preserve aspect ratio (for KITTI, etc.)
+            # If image is already at or below target size, keep native
+            if w <= self.target_width and h <= self.target_height:
+                self.scale_x = 1.0
+                self.scale_y = 1.0
+                return image
+            
+            # Calculate scale to fit within target while preserving aspect ratio
+            scale = min(self.target_width / w, self.target_height / h)
+            
+            if scale >= 1.0:
+                self.scale_x = 1.0
+                self.scale_y = 1.0
+                return image
+            
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            
+            self.scale_x = new_w / w
+            self.scale_y = new_h / h
+        else:
+            # Mode 2: Force exact target dimensions (for DJI Tello)
+            new_w = self.target_width
+            new_h = self.target_height
+            self.scale_x = new_w / w
+            self.scale_y = new_h / h
+        
+        # Apply slight Gaussian blur before downsampling to reduce aliasing
         if self.scale_x < 1.0 or self.scale_y < 1.0:
-            # Calculate appropriate blur kernel size
             blur_size = max(3, int(1.0 / min(self.scale_x, self.scale_y)) | 1)
             if blur_size > 1:
                 image = cv2.GaussianBlur(image, (blur_size, blur_size), 0)
         
-        return cv2.resize(image, (self.target_width, self.target_height), 
-                         interpolation=cv2.INTER_AREA)
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
     def to_grayscale(self, image: np.ndarray) -> np.ndarray:
         """Convert image to grayscale."""
@@ -1188,9 +1222,17 @@ class GeometryEstimator:
 class CameraMotionEstimator:
     """Main pipeline for 6-DOF camera motion estimation."""
     
-    def __init__(self, calibration_path: str):
-        """Initialize with calibration matrix."""
-        self.preprocessor = ImagePreprocessor()
+    def __init__(self, calibration_path: str, preserve_aspect_ratio: bool = True):
+        """Initialize with calibration matrix.
+        
+        Args:
+            calibration_path: Path to calibration JSON file
+            preserve_aspect_ratio: If True (default), preserves aspect ratio when
+                                   downsampling (good for KITTI, datasets with different
+                                   aspect ratios). If False, forces exact target dimensions
+                                   (use for DJI Tello with fixed calibration).
+        """
+        self.preprocessor = ImagePreprocessor(preserve_aspect_ratio=preserve_aspect_ratio)
         self.calibration = CalibrationHandler()
         self.calibration.load_calibration(calibration_path)
         self.feature_processor = FeatureProcessor()

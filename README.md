@@ -1,36 +1,69 @@
 # Monocular Visual Odometry - 6-DOF Camera Motion Estimator
 
-A high-precision Python pipeline for estimating 6 Degrees of Freedom (6-DOF) camera motion between two monocular images. Designed for mobile robotics applications including drones and ground vehicles.
+A high-precision Python pipeline for estimating 6 Degrees of Freedom (6-DOF) camera motion between two monocular images. Designed for mobile robotics applications including drones (DJI Tello) and ground vehicles.
+
+## 🎯 Current Accuracy
+
+**EuRoC MAV Dataset (MH_01_easy):** **58.3%** combined accuracy (R<5°, t<15°)
 
 ## Features
 
 - **High Accuracy Focus**: Optimized for precision over speed
-- **Robust Preprocessing**: CLAHE enhancement, bilateral filtering, automatic downsampling from 4K to 640×480
-- **ORB Feature Detection**: Configured for maximum feature coverage (5000 features)
-- **Multi-Stage Matching**: Ratio test → Cross-check → Distance filtering
-- **RANSAC Outlier Rejection**: High-confidence fundamental matrix estimation
+- **Robust Preprocessing**: CLAHE enhancement, bilateral filtering, automatic downsampling
+- **ORB Feature Detection**: Configured for maximum feature coverage (2000 features)
+- **Ratio Test Matching**: Lowe's ratio test (0.6 threshold)
+- **USAC_MAGSAC**: State-of-the-art robust estimation (OpenCV 4.5+)
 - **Essential Matrix Decomposition**: SVD-based with proper constraint enforcement
 - **Cheirality Verification**: Automatic selection of correct (R, t) solution
-- **Quality Metrics**: Comprehensive scoring and warnings system
+- **Multi-Dataset Support**: EuRoC, KITTI, DJI Tello
+- **Raspberry Pi Zero Compatible**: Lightweight CLI tool included
 
 ## Installation
 
 ### Requirements
 
 - Python 3.8+
-- OpenCV 4.x
+- OpenCV 4.5+ (for USAC_MAGSAC support)
 - NumPy
+- matplotlib (optional, for visualization)
 
 ```bash
-pip install opencv-python numpy
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-### Basic Usage
+### Basic Usage (Full Pipeline)
 
 ```bash
 python camera_motion_estimator.py <image1> <image2> <calibration_file>
+```
+
+### Raspberry Pi / DJI Tello (Lightweight CLI)
+
+```bash
+# Simple output
+python estimate_motion.py frame1.jpg frame2.jpg tello_calib.json
+
+# JSON output (for parsing)
+python estimate_motion.py frame1.jpg frame2.jpg tello_calib.json --json
+
+# Verbose mode
+python estimate_motion.py frame1.jpg frame2.jpg tello_calib.json --verbose
+```
+
+### Dataset Evaluation
+
+```bash
+# EuRoC MAV Dataset
+python evaluate_euroc.py euroc_test/machine_hall/MH_01_easy/mav0 \
+    --num_pairs 100 --step 5 --flip_z
+
+# KITTI Odometry Dataset
+python evaluate_kitti.py kitti_odometry --sequence 00 --num_pairs 100
+
+# Visualize Results
+python visualize_results.py euroc_evaluation.json --show
 ```
 
 ### With Output Directory
@@ -95,21 +128,22 @@ Supported formats:
 
 Evaluated on EuRoC Machine Hall MH_01_easy sequence (3682 images, 20Hz):
 
-### Accuracy Summary
+### Accuracy Summary (Current Best: 58.3%)
 
 | Metric | Threshold | Accuracy |
 |--------|-----------|----------|
-| **Rotation** | < 5° | **75%** |
-| **Rotation** | < 10° | **96%** |
-| **Translation Direction** | < 15° | **75%** |
-| **Translation Direction** | < 30° | **92%** |
-| **Combined (R<5°, t<15°)** | Normal | **53%** |
-| **Combined (R<10°, t<30°)** | Relaxed | **88%** |
+| **Rotation** | < 5° | **87.5%** |
+| **Rotation** | < 2° | **22.9%** |
+| **Translation Direction** | < 15° | **70.8%** |
+| **Translation Direction** | < 10° | **47.9%** |
+| **Combined (R<5°, t<15°)** | Normal | **58.3%** |
+| **Combined (R<2°, t<5°)** | Strict | **14.6%** |
+| **Combined (R<10°, t<30°)** | Relaxed | **93.8%** |
 
 ### Detailed Statistics
 
-- **Rotation Error**: Mean=3.9°, Median=2.9°
-- **Translation Direction Error**: Mean=13.3°, Median=9.9°
+- **Rotation Error**: Mean=3.3°, Median=2.9°, Std=1.9°
+- **Translation Direction Error**: Mean=13.7°, Median=10.6°, Std=13.2°
 - **100% success rate** (no OpenCV exceptions)
 
 *Note: Translation is direction-only; scale is unobservable in monocular VO*
@@ -227,11 +261,27 @@ The pipeline handles degenerate cases gracefully:
 ## Hardware Compatibility
 
 Designed and tested for:
-- **Raspberry Pi Zero** (primary target)
-- Any system with Python 3.8+ and OpenCV
+- **DJI Tello Drone** (960×720 → 640×480)
+- **Raspberry Pi Zero** (primary deployment target)
+- **KITTI-style cameras** (1242×375 with aspect ratio preservation)
+- Any system with Python 3.8+ and OpenCV 4.5+
 
 Expected performance on Raspberry Pi Zero:
 - ~0.5-1.0 seconds per frame pair
+
+## Project Structure
+
+```
+├── camera_motion_estimator.py  # Main estimation pipeline
+├── estimate_motion.py          # Lightweight CLI for Pi Zero / Tello
+├── evaluate_euroc.py           # EuRoC dataset evaluation
+├── evaluate_kitti.py           # KITTI odometry evaluation
+├── visualize_results.py        # Result visualization tools
+├── evaluation_metrics.py       # ATE/RPE metrics
+├── setup_kitti.py              # KITTI dataset setup helper
+├── tello_calibration_template.json  # DJI Tello calibration template
+└── requirements.txt            # Dependencies
+```
 
 ## License
 

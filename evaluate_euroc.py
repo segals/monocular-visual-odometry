@@ -314,9 +314,9 @@ def main():
     images = sorted(image_dir.glob('*.png'))
     print(f"    Image files: {len(images)}")
     
-    # Initialize estimator
+    # Initialize estimator (preserve_aspect_ratio=False for EuRoC to match calibration)
     print("\n[4] Initializing motion estimator...")
-    estimator = CameraMotionEstimator(str(calib_file))
+    estimator = CameraMotionEstimator(str(calib_file), preserve_aspect_ratio=False)
     
     # Evaluation results
     results = []

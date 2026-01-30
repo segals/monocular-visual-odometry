@@ -78,6 +78,7 @@ results/
 
 # Large dataset files
 euroc_test/
+kitti_odometry/
 *.zip
 *.bag
 
