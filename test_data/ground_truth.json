@@ -1,0 +1,31 @@
+{
+  "description": "Ground truth for test pair (KITTI seq 00, frames 0 and 5)",
+  "frame1": 0,
+  "frame2": 5,
+  "pose_frame1": [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "pose_frame2": [
+    [0.9999433, 0.002586172, -0.01033094, -0.2343818],
+    [-0.002645881, 0.9999798, -0.005770163, -0.141915],
+    [0.01031581, 0.00579717, 0.9999299, 4.291335],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "relative_pose": {
+    "rotation_matrix": [
+      [0.9999433, 0.002586172, -0.01033094],
+      [-0.002645881, 0.9999798, -0.005770163],
+      [0.01031581, 0.00579717, 0.9999299]
+    ],
+    "translation": [-0.2343818, -0.141915, 4.291335],
+    "translation_normalized": [-0.0543, -0.0329, 0.998],
+    "translation_magnitude_meters": 4.306
+  },
+  "expected_output": {
+    "rotation_deg": "~0.6° (mostly forward motion)",
+    "translation_direction": "Mostly +Z (forward), slight -X (left), slight -Y (down)"
+  }
+}
