@@ -22,48 +22,42 @@ from typing import Optional, Tuple, List, Any, Dict
 import cv2
 import numpy as np
 from numpy.typing import NDArray
-from scipy.spatial.transform import Rotation as ScipyRotation
 
 
 # =============================================================================
 # Configuration Constants
 # =============================================================================
 
-# Target resolution for processing (full resolution for precision)
-TARGET_WIDTH = 752              # Full resolution for precision
-TARGET_HEIGHT = 480             # Full resolution for precision
+# Target resolution for processing
+TARGET_WIDTH = 640
+TARGET_HEIGHT = 480
 
-# ORB Feature Detection Parameters (optimized for PRECISION MEASUREMENT)
-ORB_N_FEATURES = 10000         # Maximum features for dense coverage
-ORB_SCALE_FACTOR = 1.15        # Finer scale factor for better localization
-ORB_N_LEVELS = 12              # More pyramid levels for scale invariance
-ORB_EDGE_THRESHOLD = 19        # Smaller edge threshold - include more features
+# ORB Feature Detection Parameters (optimized for accuracy)
+ORB_N_FEATURES = 5000          # High number for better coverage
+ORB_SCALE_FACTOR = 1.2         # Pyramid scale factor
+ORB_N_LEVELS = 8               # Number of pyramid levels
+ORB_EDGE_THRESHOLD = 31        # Border margin for features
 ORB_FIRST_LEVEL = 0            # Start from original resolution
 ORB_WTA_K = 2                  # Number of points for binary test
 ORB_PATCH_SIZE = 31            # Descriptor patch size
-ORB_FAST_THRESHOLD = 10        # Lower threshold for more corners (no noise assumed)
+ORB_FAST_THRESHOLD = 20        # FAST corner threshold
 
-# Matching Parameters (balanced for precision with enough matches)
-RATIO_TEST_THRESHOLD = 0.55    # Strict but not too strict
-MAX_HAMMING_DISTANCE = 40      # Strict but allow some tolerance
+# Matching Parameters
+RATIO_TEST_THRESHOLD = 0.6     # Lowe's ratio test - sweet spot
+MAX_HAMMING_DISTANCE = 45      # Maximum acceptable Hamming distance
 
-# RANSAC Parameters (STRICT for precision - no noise)
-RANSAC_CONFIDENCE = 0.99999    # Maximum confidence
-RANSAC_THRESHOLD = 0.5         # Tight threshold (0.5 pixels)
-RANSAC_MAX_ITERS = 30000       # High iterations for best result
+# RANSAC Parameters (optimized for accuracy)
+RANSAC_CONFIDENCE = 0.9999     # Very high confidence
+RANSAC_THRESHOLD = 0.75        # Strict inlier threshold (pixels)
+RANSAC_MAX_ITERS = 15000       # Very high iteration count for accuracy
 
 # Use USAC (Universal RANSAC) if available - much better than regular RANSAC
+# USAC methods: USAC_DEFAULT, USAC_PARALLEL, USAC_FM_8PTS, USAC_FAST, USAC_ACCURATE, USAC_PROSAC, USAC_MAGSAC
 USE_USAC = True
 USAC_METHOD = cv2.USAC_MAGSAC if hasattr(cv2, 'USAC_MAGSAC') else cv2.USAC_DEFAULT if hasattr(cv2, 'USAC_DEFAULT') else None
 
 # Essential matrix estimation parameters
-ESSENTIAL_THRESHOLD = 0.5      # Tight threshold for essential matrix
-
-# Sub-pixel refinement for precision
-SUBPIXEL_REFINEMENT = True     # Enable sub-pixel corner refinement
-SUBPIXEL_WIN_SIZE = (5, 5)     # Window size for cornerSubPix
-SUBPIXEL_ZERO_ZONE = (-1, -1)  # No zero zone
-SUBPIXEL_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.001)
+ESSENTIAL_THRESHOLD = 0.75     # Threshold for essential matrix estimation
 
 # Quality Thresholds
 MIN_FEATURES_WARNING = 100     # Warn if fewer features detected
@@ -71,13 +65,9 @@ MIN_MATCHES_WARNING = 50       # Warn if fewer matches found
 MIN_INLIERS_WARNING = 20       # Warn if fewer inliers after RANSAC
 MIN_INLIERS_CRITICAL = 8       # Minimum required for fundamental matrix
 
-# CLAHE Parameters (disabled for precision - no noise to handle)
-CLAHE_ENABLED = False          # Disable CLAHE for precision measurement
-CLAHE_CLIP_LIMIT = 2.0
+# CLAHE Parameters
+CLAHE_CLIP_LIMIT = 2.5
 CLAHE_TILE_SIZE = 8
-
-# Bilateral filter (disabled for precision - preserves exact edges)
-BILATERAL_ENABLED = False      # Disable bilateral filter
 
 
 # =============================================================================
@@ -254,17 +244,11 @@ class ImagePreprocessor:
         # Check quality
         _, warnings = self.check_image_quality(gray)
         
-        # Apply CLAHE only if enabled (disabled for precision measurement)
-        if CLAHE_ENABLED:
-            enhanced = self.apply_clahe(gray)
-        else:
-            enhanced = gray
+        # Apply CLAHE
+        enhanced = self.apply_clahe(gray)
         
-        # Apply bilateral filter only if enabled (disabled for precision measurement)
-        if BILATERAL_ENABLED:
-            filtered = self.apply_bilateral_filter(enhanced)
-        else:
-            filtered = enhanced
+        # Apply bilateral filter
+        filtered = self.apply_bilateral_filter(enhanced)
         
         return filtered, warnings
 
@@ -352,33 +336,9 @@ class FeatureProcessor:
         self.matcher = cv2.BFMatcher_create(cv2.NORM_HAMMING, crossCheck=False)
         
     def detect_and_compute(self, image: np.ndarray) -> Tuple[Any, Optional[np.ndarray]]:
-        """Detect keypoints and compute descriptors with optional sub-pixel refinement."""
+        """Detect keypoints and compute descriptors."""
         keypoints, descriptors = self.orb.detectAndCompute(image, None)
-        
-        # Apply sub-pixel refinement for precision measurement
-        if SUBPIXEL_REFINEMENT and keypoints is not None and len(keypoints) > 0:
-            keypoints = self._refine_keypoints_subpixel(keypoints, image)
-        
         return keypoints, descriptors
-    
-    def _refine_keypoints_subpixel(self, keypoints: Any, image: np.ndarray) -> Any:
-        """Refine keypoint locations to sub-pixel precision using cornerSubPix."""
-        # Extract corner locations
-        corners = np.array([kp.pt for kp in keypoints], dtype=np.float32).reshape(-1, 1, 2)
-        
-        # Refine to sub-pixel accuracy
-        refined_corners = cv2.cornerSubPix(
-            image, corners,
-            winSize=SUBPIXEL_WIN_SIZE,
-            zeroZone=SUBPIXEL_ZERO_ZONE,
-            criteria=SUBPIXEL_CRITERIA
-        )
-        
-        # Update keypoint positions
-        for i, kp in enumerate(keypoints):
-            kp.pt = (float(refined_corners[i, 0, 0]), float(refined_corners[i, 0, 1]))
-        
-        return keypoints
     
     def spatial_bucketing(self, keypoints: Any, 
                           image_shape: Tuple[int, int],
@@ -973,64 +933,31 @@ class GeometryEstimator:
                             t_best = second[1]
                             best_num = second[2]
             
-            # Single pass refinement: rotation then translation
-            R_refined = self._refine_rotation(R_best, t_best, pts1, pts2)
-            t_refined = self._refine_translation_direction(R_refined, t_best, pts1, pts2)
+            # Refine translation direction with finer local optimization
+            t_refined = self._refine_translation_direction(R_best, t_best, pts1, pts2)
             
             # Validate refinement improved things
-            num_refined, err_refined, _ = self._evaluate_pose_quality(R_refined, t_refined, pts1, pts2)
+            num_refined, err_refined, _ = self._evaluate_pose_quality(R_best, t_refined, pts1, pts2)
             num_orig, err_orig, _ = self._evaluate_pose_quality(R_best, t_best, pts1, pts2)
             
             # Only use refinement if it clearly improved things
-            if err_refined > err_orig * 1.5 or num_refined < num_orig * 0.7:
-                R_refined = R_best
+            if err_refined > err_orig * 1.2 or num_refined < num_orig * 0.8:
                 t_refined = t_best
             else:
                 best_num = max(best_num, num_refined)
                 
-            return R_refined, t_refined, best_num
+            return R_best, t_refined, best_num
             
         except Exception as e:
             pass
         
         return np.eye(3), np.array([[0], [0], [1]], dtype=np.float64), 0
     
-    def _refine_rotation(self, R_init: np.ndarray, t: np.ndarray,
-                         pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
-        """
-        Refine rotation matrix by local search around the initial estimate.
-        Uses axis-angle representation with efficient axis-by-axis optimization.
-        """
-        # Convert initial rotation to rotation vector (axis-angle)
-        r_vec = ScipyRotation.from_matrix(R_init).as_rotvec()
-        
-        _, best_err, _ = self._evaluate_pose_quality(R_init, t, pts1, pts2)
-        best_R = R_init.copy()
-        
-        # Quick axis-by-axis refinement - just 2 passes for efficiency
-        for scale in [0.01, 0.003]:
-            for axis in range(3):  # x, y, z axes
-                for delta in [-scale, 0, scale]:
-                    if delta == 0:
-                        continue
-                    r_new = r_vec.copy()
-                    r_new[axis] += delta
-                    R_new = ScipyRotation.from_rotvec(r_new).as_matrix()
-                    
-                    _, err, _ = self._evaluate_pose_quality(R_new, t, pts1, pts2)
-                    
-                    if err < best_err:
-                        best_err = err
-                        best_R = R_new.copy()
-                        r_vec = r_new
-        
-        return best_R
-    
     def _refine_translation_direction(self, R: np.ndarray, t_init: np.ndarray, 
                                        pts1: np.ndarray, pts2: np.ndarray) -> np.ndarray:
         """
         Refine translation direction by minimizing reprojection error
-        while keeping rotation fixed. Uses efficient coarse-to-fine search.
+        while keeping rotation fixed. Does coarse-to-fine local search.
         """
         t = t_init.flatten()
         t = t / (np.linalg.norm(t) + 1e-10)  # Normalize
@@ -1042,10 +969,10 @@ class GeometryEstimator:
         best_t = t_init.copy()
         _, best_err, _ = self._evaluate_pose_quality(R, t_init, pts1, pts2)
         
-        # Efficient coarse-to-fine search with smaller grid for speed
-        for scale in [0.15, 0.05, 0.015, 0.005]:
-            for d_theta in [-scale, 0, scale]:
-                for d_phi in [-scale, 0, scale]:
+        # Local refinement with coarse-to-fine search (finer grid for better accuracy)
+        for scale in [0.2, 0.1, 0.05, 0.02, 0.01]:
+            for d_theta in np.linspace(-scale, scale, 5):
+                for d_phi in np.linspace(-scale, scale, 5):
                     new_theta = theta + d_theta
                     new_phi = np.clip(phi + d_phi, 0.01, np.pi - 0.01)
                     
