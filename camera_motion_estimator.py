@@ -32,19 +32,21 @@ from numpy.typing import NDArray
 TARGET_WIDTH = 640
 TARGET_HEIGHT = 480
 
-# ORB Feature Detection Parameters (optimized for accuracy)
-ORB_N_FEATURES = 5000          # High number for better coverage
-ORB_SCALE_FACTOR = 1.2         # Pyramid scale factor
-ORB_N_LEVELS = 8               # Number of pyramid levels
-ORB_EDGE_THRESHOLD = 31        # Border margin for features
-ORB_FIRST_LEVEL = 0            # Start from original resolution
-ORB_WTA_K = 2                  # Number of points for binary test
-ORB_PATCH_SIZE = 31            # Descriptor patch size
-ORB_FAST_THRESHOLD = 20        # FAST corner threshold
+# Feature Detection Parameters (Shi-Tomasi corners for optical flow)
+MAX_CORNERS = 2000             # Maximum corners to detect
+CORNER_QUALITY = 0.01          # Quality level for corner detection
+MIN_CORNER_DISTANCE = 7        # Minimum distance between corners
+CORNER_BLOCK_SIZE = 7          # Block size for corner detection
 
-# Matching Parameters
-RATIO_TEST_THRESHOLD = 0.6     # Lowe's ratio test - sweet spot
-MAX_HAMMING_DISTANCE = 45      # Maximum acceptable Hamming distance
+# Optical Flow Parameters (Lucas-Kanade)
+LK_WIN_SIZE = (21, 21)         # Window size for optical flow
+LK_MAX_LEVEL = 3               # Maximum pyramid level
+LK_CRITERIA = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+LK_MIN_EIG_THRESHOLD = 0.001   # Minimum eigenvalue threshold
+
+# Flow Validation Parameters
+FORWARD_BACKWARD_THRESHOLD = 1.0  # Max pixel error for forward-backward check
+MIN_FLOW_MAGNITUDE = 0.5       # Minimum flow to consider valid
 
 # RANSAC Parameters (optimized for accuracy)
 RANSAC_CONFIDENCE = 0.9999     # Very high confidence
@@ -346,125 +348,120 @@ class CalibrationHandler:
 
 
 # =============================================================================
-# Feature Detection and Matching Module
+# Feature Detection and Optical Flow Tracking Module
 # =============================================================================
 
 class FeatureProcessor:
-    """Handles ORB feature detection, description, and matching."""
+    """Handles feature detection and optical flow tracking."""
     
     def __init__(self):
-        # Create ORB detector with optimized parameters
-        self.orb = cv2.ORB_create(
-            nfeatures=ORB_N_FEATURES,
-            scaleFactor=ORB_SCALE_FACTOR,
-            nlevels=ORB_N_LEVELS,
-            edgeThreshold=ORB_EDGE_THRESHOLD,
-            firstLevel=ORB_FIRST_LEVEL,
-            WTA_K=ORB_WTA_K,
-            scoreType=cv2.ORB_HARRIS_SCORE,
-            patchSize=ORB_PATCH_SIZE,
-            fastThreshold=ORB_FAST_THRESHOLD
+        # Lucas-Kanade optical flow parameters
+        self.lk_params = dict(
+            winSize=LK_WIN_SIZE,
+            maxLevel=LK_MAX_LEVEL,
+            criteria=LK_CRITERIA,
+            minEigThreshold=LK_MIN_EIG_THRESHOLD
         )
         
-        # Create brute-force matcher with Hamming distance
-        self.matcher = cv2.BFMatcher_create(cv2.NORM_HAMMING, crossCheck=False)
-        
-    def detect_and_compute(self, image: np.ndarray) -> Tuple[Any, Optional[np.ndarray]]:
-        """Detect keypoints and compute descriptors."""
-        keypoints, descriptors = self.orb.detectAndCompute(image, None)
-        return keypoints, descriptors
+        # Shi-Tomasi corner detection parameters
+        self.feature_params = dict(
+            maxCorners=MAX_CORNERS,
+            qualityLevel=CORNER_QUALITY,
+            minDistance=MIN_CORNER_DISTANCE,
+            blockSize=CORNER_BLOCK_SIZE
+        )
     
-    def spatial_bucketing(self, keypoints: Any, 
-                          image_shape: Tuple[int, int],
-                          grid_size: Tuple[int, int] = (8, 6),
-                          max_per_cell: int = 100) -> List[int]:
+    def detect_features(self, image: np.ndarray) -> np.ndarray:
         """
-        Apply spatial bucketing to ensure features are distributed across the image.
-        Returns indices of selected keypoints.
+        Detect good features to track using Shi-Tomasi corner detection.
+        Returns Nx1x2 array of corner coordinates.
         """
-        h, w = image_shape[:2]
-        cell_h = h / grid_size[1]
-        cell_w = w / grid_size[0]
+        corners = cv2.goodFeaturesToTrack(image, mask=None, **self.feature_params)
+        if corners is None:
+            return np.array([], dtype=np.float32).reshape(0, 1, 2)
+        return corners
+    
+    def track_features(self, img1: np.ndarray, img2: np.ndarray, 
+                       pts1: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Track features from img1 to img2 using Lucas-Kanade optical flow.
         
-        # Create buckets
-        buckets: Dict[Tuple[int, int], List[Tuple[int, float]]] = {}
-        for idx, kp in enumerate(keypoints):
-            pt = kp.pt  # type: ignore
-            response = kp.response  # type: ignore
-            cell_x = min(int(pt[0] / cell_w), grid_size[0] - 1)
-            cell_y = min(int(pt[1] / cell_h), grid_size[1] - 1)
-            cell_key = (cell_x, cell_y)
+        Args:
+            img1: First grayscale image
+            img2: Second grayscale image
+            pts1: Points to track (Nx1x2 or Nx2)
             
-            if cell_key not in buckets:
-                buckets[cell_key] = []
-            buckets[cell_key].append((idx, response))
+        Returns:
+            pts1_good: Successfully tracked points in image 1
+            pts2_good: Corresponding points in image 2
+            status: Tracking status for each point
+        """
+        if len(pts1) == 0:
+            return np.array([]), np.array([]), np.array([])
         
-        # Select top keypoints from each bucket
-        selected_indices = []
-        for cell_key, kp_list in buckets.items():
-            # Sort by response (descending)
-            kp_list.sort(key=lambda x: x[1], reverse=True)
-            # Take top N
-            for idx, _ in kp_list[:max_per_cell]:
-                selected_indices.append(idx)
-                
-        return selected_indices
-    
-    def match_features(self, desc1: Optional[np.ndarray], desc2: Optional[np.ndarray]) -> List[Any]:
-        """Match features using kNN with ratio test."""
-        if desc1 is None or desc2 is None:
-            return []
-        if len(desc1) < 2 or len(desc2) < 2:
-            return []
-            
-        # Find 2 nearest neighbors for ratio test
-        matches = self.matcher.knnMatch(desc1, desc2, k=2)
+        # Ensure correct shape for optical flow
+        if pts1.ndim == 2:
+            pts1 = pts1.reshape(-1, 1, 2)
+        pts1 = pts1.astype(np.float32)
         
-        return matches
-    
-    def apply_ratio_test(self, matches: List[Any], threshold: float = RATIO_TEST_THRESHOLD) -> List[Any]:
-        """Apply Lowe's ratio test to filter matches."""
-        good_matches = []
-        for match_pair in matches:
-            if len(match_pair) == 2:
-                m, n = match_pair
-                if m.distance < threshold * n.distance:
-                    good_matches.append(m)
-        return good_matches
-    
-    def apply_cross_check(self, desc1: np.ndarray, desc2: np.ndarray,
-                          forward_matches: List[Any]) -> List[Any]:
-        """Apply cross-check validation."""
-        if len(forward_matches) == 0:
-            return []
-            
-        # Match in reverse direction
-        reverse_matches = self.matcher.knnMatch(desc2, desc1, k=2)
-        reverse_good = self.apply_ratio_test(reverse_matches)
+        # Forward optical flow: img1 -> img2
+        pts2, status_fwd, err_fwd = cv2.calcOpticalFlowPyrLK(
+            img1, img2, pts1, None, **self.lk_params
+        )
         
-        # Build reverse lookup
-        reverse_lookup = {m.queryIdx: m.trainIdx for m in reverse_good}  # type: ignore
+        if pts2 is None:
+            return np.array([]), np.array([]), np.array([])
         
-        # Keep only mutual matches
-        cross_checked: List[Any] = []
-        for m in forward_matches:
-            if m.trainIdx in reverse_lookup:  # type: ignore
-                if reverse_lookup[m.trainIdx] == m.queryIdx:  # type: ignore
-                    cross_checked.append(m)
-                    
-        return cross_checked
+        # Backward optical flow: img2 -> img1 (for validation)
+        pts1_back, status_bwd, err_bwd = cv2.calcOpticalFlowPyrLK(
+            img2, img1, pts2, None, **self.lk_params
+        )
+        
+        # Forward-backward consistency check
+        if pts1_back is not None:
+            fb_error = np.linalg.norm(pts1 - pts1_back, axis=2).flatten()
+            fb_valid = fb_error < FORWARD_BACKWARD_THRESHOLD
+        else:
+            fb_valid = np.ones(len(pts1), dtype=bool)
+        
+        # Combine all validity checks
+        status_fwd = status_fwd.flatten().astype(bool)
+        status_bwd = status_bwd.flatten().astype(bool) if status_bwd is not None else np.ones(len(pts1), dtype=bool)
+        
+        # Check for minimum flow magnitude
+        flow = pts2.reshape(-1, 2) - pts1.reshape(-1, 2)
+        flow_mag = np.linalg.norm(flow, axis=1)
+        flow_valid = flow_mag >= MIN_FLOW_MAGNITUDE
+        
+        # Combined validity mask
+        valid = status_fwd & status_bwd & fb_valid & flow_valid
+        
+        # Extract valid points
+        pts1_good = pts1.reshape(-1, 2)[valid]
+        pts2_good = pts2.reshape(-1, 2)[valid]
+        
+        return pts1_good, pts2_good, valid
     
-    def filter_by_distance(self, matches: List[Any], 
-                           max_distance: int = MAX_HAMMING_DISTANCE) -> List[Any]:
-        """Filter matches by maximum Hamming distance."""
-        return [m for m in matches if m.distance <= max_distance]  # type: ignore
-    
-    def extract_matched_points(self, kp1: Any, kp2: Any,
-                               matches: List[Any]) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract matched point coordinates."""
-        pts1 = np.array([kp1[m.queryIdx].pt for m in matches], dtype=np.float32)  # type: ignore
-        pts2 = np.array([kp2[m.trainIdx].pt for m in matches], dtype=np.float32)  # type: ignore
-        return pts1, pts2
+    def compute_flow_with_detection(self, img1: np.ndarray, img2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+        """
+        Complete pipeline: detect features in img1 and track to img2.
+        
+        Returns:
+            pts1: Matched points in image 1 (Nx2)
+            pts2: Matched points in image 2 (Nx2)
+            num_detected: Number of features initially detected
+        """
+        # Detect features in first image
+        corners = self.detect_features(img1)
+        num_detected = len(corners)
+        
+        if num_detected == 0:
+            return np.array([]), np.array([]), 0
+        
+        # Track to second image
+        pts1_good, pts2_good, _ = self.track_features(img1, img2, corners)
+        
+        return pts1_good, pts2_good, num_detected
 
 
 # =============================================================================
@@ -1298,63 +1295,34 @@ class CameraMotionEstimator:
                 print(f"    - {w}")
         
         # ---------------------------------------------------------------------
-        # Stage 2: Feature Detection
+        # Stage 2: Feature Detection and Optical Flow Tracking
         # ---------------------------------------------------------------------
-        print("\n[Stage 2] Feature Detection (ORB)...")
+        print("\n[Stage 2] Feature Detection (Shi-Tomasi corners)...")
+        print("\n[Stage 3] Feature Tracking (Lucas-Kanade Optical Flow)...")
         
-        kp1, desc1 = self.feature_processor.detect_and_compute(img1)
-        kp2, desc2 = self.feature_processor.detect_and_compute(img2)
+        # Detect features in image 1 and track to image 2
+        pts1, pts2, num_detected = self.feature_processor.compute_flow_with_detection(img1, img2)
         
-        metrics.features_image1 = len(kp1)
-        metrics.features_image2 = len(kp2)
+        metrics.features_image1 = num_detected
+        metrics.features_image2 = len(pts2)  # Successfully tracked features
+        metrics.raw_matches = num_detected
+        metrics.ratio_test_matches = len(pts1)  # After forward-backward check
+        metrics.cross_check_matches = len(pts1)
         
-        print(f"  Image 1: {len(kp1)} features detected")
-        print(f"  Image 2: {len(kp2)} features detected")
+        print(f"  Features detected in image 1: {num_detected}")
+        print(f"  Successfully tracked to image 2: {len(pts1)}")
+        print(f"  Tracking success rate: {100*len(pts1)/max(1,num_detected):.1f}%")
         
-        if len(kp1) < MIN_FEATURES_WARNING:
-            metrics.warnings.append(f"Low feature count in image 1: {len(kp1)}")
-        if len(kp2) < MIN_FEATURES_WARNING:
-            metrics.warnings.append(f"Low feature count in image 2: {len(kp2)}")
+        if num_detected < MIN_FEATURES_WARNING:
+            metrics.warnings.append(f"Low feature count: {num_detected}")
+        
+        if len(pts1) < MIN_MATCHES_WARNING:
+            metrics.warnings.append(f"Low tracking count: {len(pts1)}")
         
         # Check for critical failure
-        if desc1 is None or desc2 is None or len(kp1) < 8 or len(kp2) < 8:
-            print("  [CRITICAL] Insufficient features detected!")
+        if len(pts1) < MIN_INLIERS_CRITICAL:
+            print("  [CRITICAL] Insufficient tracked features!")
             return self._create_identity_result(metrics, start_time)
-        
-        # ---------------------------------------------------------------------
-        # Stage 3: Feature Matching
-        # ---------------------------------------------------------------------
-        print("\n[Stage 3] Feature Matching...")
-        
-        # Initial matching
-        raw_matches = self.feature_processor.match_features(desc1, desc2)
-        metrics.raw_matches = len(raw_matches)
-        print(f"  Raw kNN matches: {len(raw_matches)}")
-        
-        # Ratio test
-        ratio_matches = self.feature_processor.apply_ratio_test(raw_matches)
-        metrics.ratio_test_matches = len(ratio_matches)
-        print(f"  After ratio test (threshold={RATIO_TEST_THRESHOLD}): {len(ratio_matches)}")
-        
-        # Cross-check
-        cross_checked = self.feature_processor.apply_cross_check(desc1, desc2, ratio_matches)
-        metrics.cross_check_matches = len(cross_checked)
-        print(f"  After cross-check: {len(cross_checked)}")
-        
-        # Distance filter
-        filtered_matches = self.feature_processor.filter_by_distance(cross_checked)
-        print(f"  After distance filter (max={MAX_HAMMING_DISTANCE}): {len(filtered_matches)}")
-        
-        if len(filtered_matches) < MIN_MATCHES_WARNING:
-            metrics.warnings.append(f"Low match count: {len(filtered_matches)}")
-            
-        # Check for critical failure
-        if len(filtered_matches) < MIN_INLIERS_CRITICAL:
-            print("  [CRITICAL] Insufficient matches!")
-            return self._create_identity_result(metrics, start_time)
-        
-        # Extract point coordinates
-        pts1, pts2 = self.feature_processor.extract_matched_points(kp1, kp2, filtered_matches)
         
         # Compute motion magnitude (average optical flow)
         flow = pts2 - pts1

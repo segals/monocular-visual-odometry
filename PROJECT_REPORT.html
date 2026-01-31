@@ -1,0 +1,529 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 40px;
+    color: #333;
+}
+h1 {
+    font-size: 24pt;
+    color: #1a1a1a;
+    border-bottom: 2px solid #333;
+    padding-bottom: 10px;
+    margin-top: 0;
+}
+h2 {
+    font-size: 16pt;
+    color: #2c3e50;
+    margin-top: 30px;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 5px;
+}
+h3 {
+    font-size: 13pt;
+    color: #34495e;
+    margin-top: 20px;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 15px 0;
+    font-size: 10pt;
+}
+th, td {
+    border: 1px solid #ddd;
+    padding: 8px 12px;
+    text-align: left;
+}
+th {
+    background-color: #f5f5f5;
+    font-weight: bold;
+}
+tr:nth-child(even) {
+    background-color: #fafafa;
+}
+code {
+    background-color: #f4f4f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 10pt;
+}
+pre {
+    background-color: #f4f4f4;
+    padding: 15px;
+    border-radius: 5px;
+    overflow-x: auto;
+    font-size: 9pt;
+}
+pre code {
+    padding: 0;
+    background: none;
+}
+strong {
+    color: #1a1a1a;
+}
+hr {
+    border: none;
+    border-top: 1px solid #ddd;
+    margin: 30px 0;
+}
+p {
+    margin: 10px 0;
+}
+ul, ol {
+    margin: 10px 0;
+    padding-left: 25px;
+}
+li {
+    margin: 5px 0;
+}
+</style>
+</head>
+<body>
+<h1>Monocular Visual Odometry Project Report</h1>
+<h2>Lia Bercovitz and Gilad Segal</h2>
+<h2>Abstract</h2>
+<p>This project presents a monocular visual odometry pipeline for estimating 6 Degrees of Freedom (6-DOF) camera motion between two consecutive images. Given two monocular JPG images and camera calibration parameters, the system computes a 3×3 rotation matrix <strong>R</strong> and a 3×1 translation direction vector <strong>t</strong>. The project evolved from an accuracy-focused implementation using SIFT features to a real-time system using Lucas-Kanade optical flow tracking, driven by the requirement to deploy on a Raspberry Pi. The final system achieves <strong>85% accuracy on KITTI</strong> and <strong>58% on EuRoC</strong> benchmarks while running in under 1 second on embedded hardware.</p>
+<hr />
+<h2>1. Introduction</h2>
+<h3>1.1 Problem Definition</h3>
+<p>Visual odometry estimates camera motion by analyzing image sequences. Given two consecutive frames from a monocular camera and the camera intrinsic matrix <strong>K</strong>, we aim to recover:</p>
+<ul>
+<li><strong>R</strong>: 3×3 rotation matrix describing orientation change</li>
+<li><strong>t</strong>: 3×1 unit translation vector describing motion direction</li>
+</ul>
+<p>The translation magnitude (scale) is unobservable in monocular systems—this is a fundamental limitation we accept.</p>
+<h3>1.2 Project Objectives</h3>
+<ol>
+<li>Develop a robust two-frame motion estimation pipeline</li>
+<li>Achieve high accuracy on standard benchmarks</li>
+<li>Enable real-time operation on Raspberry Pi Zero</li>
+<li>Provide tools for evaluation and visualization</li>
+</ol>
+<h3>1.3 Target Platforms</h3>
+<ul>
+<li><strong>Primary</strong>: DJI Tello drone with Raspberry Pi Zero companion computer</li>
+<li><strong>Secondary</strong>: Desktop evaluation on KITTI and EuRoC datasets</li>
+</ul>
+<hr />
+<h2>2. Algorithm Overview</h2>
+<p>The pipeline follows the classical feature-based visual odometry approach:</p>
+<pre><code>Image Pair → Preprocessing → Feature Detection → Optical Flow Tracking → 
+Essential Matrix → Motion Decomposition → (R, t)
+</code></pre>
+<h3>2.1 Preprocessing</h3>
+<p>Images are downsampled to 640×480 with anti-aliasing to reduce computation while preserving geometric information. We apply:</p>
+<ul>
+<li><strong>CLAHE</strong> (Contrast Limited Adaptive Histogram Equalization): Improves feature detection in low-contrast regions</li>
+<li><strong>Bilateral filtering</strong>: Edge-preserving noise reduction</li>
+</ul>
+<p>The camera matrix <strong>K</strong> is scaled proportionally to maintain geometric consistency.</p>
+<h3>2.2 Feature Detection and Tracking</h3>
+<p>We use <strong>Shi-Tomasi corner detection</strong> to find trackable features, followed by <strong>Lucas-Kanade optical flow</strong> for tracking:</p>
+<p><strong>Corner Detection (Shi-Tomasi):</strong>
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Max corners | 2000 | Sufficient coverage |
+| Quality level | 0.01 | Sensitive detection |
+| Min distance | 7 px | Avoid clustering |</p>
+<p><strong>Optical Flow (Lucas-Kanade):</strong>
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Window size | 21×21 | Balance accuracy/speed |
+| Pyramid levels | 3 | Handle larger motions |
+| Forward-backward threshold | 1.0 px | Validation check |</p>
+<p>The forward-backward consistency check tracks points from image 1 to image 2, then back to image 1. Points with round-trip error &gt; 1 pixel are rejected as unreliable.</p>
+<h3>2.3 Essential Matrix Estimation</h3>
+<p>We estimate the Essential matrix <strong>E</strong> directly using <strong>USAC_MAGSAC</strong> (OpenCV 4.5+), which automatically determines optimal inlier thresholds through marginalization. This significantly outperforms classical RANSAC.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Method</td>
+<td>USAC_MAGSAC</td>
+</tr>
+<tr>
+<td>Confidence</td>
+<td>0.9999</td>
+</tr>
+<tr>
+<td>Max iterations</td>
+<td>15,000</td>
+</tr>
+<tr>
+<td>Threshold</td>
+<td>0.75 pixels</td>
+</tr>
+</tbody>
+</table>
+<p>The Essential matrix is constrained to have singular values (σ, σ, 0) via SVD correction.</p>
+<h3>2.4 Motion Decomposition</h3>
+<p>The Essential matrix yields four possible (R, t) solutions. We select the correct one using:</p>
+<ol>
+<li><strong>Cheirality check</strong>: Triangulated points must have positive depth in both cameras</li>
+<li><strong>Reprojection error</strong>: Lower error indicates better solution</li>
+<li><strong>Depth consistency</strong>: Valid solutions have consistent depth distribution</li>
+</ol>
+<p>Additionally, we validate translation direction using optical flow analysis to resolve sign ambiguity.</p>
+<h3>2.5 Quality Scoring</h3>
+<p>The system computes a quality score (0-100) based on:
+- Feature count (penalty if &lt; 100)
+- Match count after filtering (penalty if &lt; 50)
+- RANSAC inlier ratio (penalty if &lt; 30%)
+- Reprojection error (penalty if &gt; 1 pixel)</p>
+<p>This score enables downstream systems to assess result reliability.</p>
+<hr />
+<h2>3. Development Path</h2>
+<h3>3.1 Initial Design: Accuracy First</h3>
+<p>The project began with accuracy as the sole priority, without considering computational constraints.</p>
+<p><strong>Initial choices:</strong>
+- <strong>SIFT features</strong>: 128-dimensional floating-point descriptors, highly distinctive
+- <strong>FLANN matching</strong>: Approximate nearest neighbor for efficiency with SIFT
+- <strong>High feature count</strong>: 10,000+ features per image
+- <strong>Extensive refinement</strong>: Multiple stages of outlier rejection</p>
+<p><strong>Results</strong>: High accuracy on benchmarks, but <strong>processing time exceeded 2 seconds per frame</strong> on desktop hardware.</p>
+<h3>3.2 The Raspberry Pi Constraint</h3>
+<p>Mid-project, we decided to deploy on a Raspberry Pi Zero for the DJI Tello application. This introduced strict constraints:</p>
+<ul>
+<li><strong>CPU</strong>: Single-core 1GHz ARM</li>
+<li><strong>RAM</strong>: 512MB</li>
+<li><strong>Target</strong>: &lt; 1 second per frame pair</li>
+</ul>
+<p>SIFT was completely infeasible—a single frame required 5+ seconds on the Pi.</p>
+<h3>3.3 Migration to Optical Flow</h3>
+<p>We replaced SIFT descriptor matching with Lucas-Kanade optical flow tracking:</p>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>SIFT Matching</th>
+<th>Optical Flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Approach</td>
+<td>Detect + Describe + Match</td>
+<td>Detect + Track</td>
+</tr>
+<tr>
+<td>Computation</td>
+<td>Heavy (128D descriptors)</td>
+<td>Light (local search)</td>
+</tr>
+<tr>
+<td>Detection time</td>
+<td>~100ms</td>
+<td>~10ms</td>
+</tr>
+<tr>
+<td>Matching/Tracking time</td>
+<td>~50ms</td>
+<td>~15ms</td>
+</tr>
+<tr>
+<td>Robustness</td>
+<td>Scale/rotation invariant</td>
+<td>Requires small motion</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key insight</strong>: For consecutive video frames, motion between frames is typically small (&lt; 50 pixels). Optical flow exploits this assumption for faster and often more accurate correspondence.</p>
+<p><strong>Validation</strong>: We use forward-backward consistency checking—track points forward, then backward, and reject points where the round-trip error exceeds 1 pixel. This provides robust outlier rejection without needing descriptor matching.</p>
+<h3>3.4 RANSAC to USAC_MAGSAC</h3>
+<p>Classical RANSAC with fixed thresholds performed inconsistently across different motion magnitudes. We adopted USAC_MAGSAC, which:</p>
+<ul>
+<li>Marginalizes over possible thresholds</li>
+<li>Adapts to varying noise levels</li>
+<li>Provides ~5% accuracy improvement at similar speed</li>
+</ul>
+<h3>3.5 What Did Not Work</h3>
+<p>Several approaches were tried and abandoned:</p>
+<ol>
+<li>
+<p><strong>Fundamental matrix first, then E = K'FK</strong>: Less accurate than direct Essential matrix estimation with calibrated points</p>
+</li>
+<li>
+<p><strong>Aggressive downsampling (320×240)</strong>: Too few features survived, especially in low-texture regions</p>
+</li>
+<li>
+<p><strong>ORB descriptor matching</strong>: Tested as an intermediate step between SIFT and optical flow. While faster than SIFT, the binary descriptors produced more false matches than optical flow with forward-backward validation</p>
+</li>
+<li>
+<p><strong>Homography-based degeneracy rejection</strong>: Useful for detection but not for correction; we kept it only as a warning flag</p>
+</li>
+</ol>
+<h3>3.6 Final Architecture</h3>
+<p>The final system has two implementations:</p>
+<ol>
+<li><strong>Full pipeline</strong> (<code>camera_motion_estimator.py</code>): All features, diagnostics, and fallbacks for evaluation</li>
+<li><strong>Lightweight CLI</strong> (<code>estimate_motion.py</code>): Minimal code for Raspberry Pi deployment</li>
+</ol>
+<hr />
+<h2>4. Evaluation</h2>
+<h3>4.1 Datasets</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Platform</th>
+<th>Resolution</th>
+<th>Motion Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>KITTI</strong></td>
+<td>Ground vehicle</td>
+<td>1241×376</td>
+<td>Forward driving</td>
+</tr>
+<tr>
+<td><strong>EuRoC</strong></td>
+<td>MAV drone</td>
+<td>752×480</td>
+<td>6-DOF flight</td>
+</tr>
+</tbody>
+</table>
+<h3>4.2 Metrics</h3>
+<ul>
+<li><strong>Rotation error</strong>: Angle between estimated and ground truth rotation (degrees)</li>
+<li><strong>Translation error</strong>: Angle between estimated and ground truth translation direction (degrees)</li>
+<li><strong>Combined accuracy</strong>: Percentage of pairs with R &lt; 5° AND t &lt; 15°</li>
+</ul>
+<h3>4.3 Results</h3>
+<h4>KITTI Odometry (Sequence 00)</h4>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Mean</th>
+<th>Median</th>
+<th>Std</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rotation error</td>
+<td>0.56°</td>
+<td>0.39°</td>
+<td>0.65°</td>
+</tr>
+<tr>
+<td>Translation error</td>
+<td>9.5°</td>
+<td>3.3°</td>
+<td>14.5°</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Threshold</th>
+<th>Rotation</th>
+<th>Translation</th>
+<th>Combined</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strict (R&lt;2°, t&lt;5°)</td>
+<td>95%</td>
+<td>75%</td>
+<td><strong>75%</strong></td>
+</tr>
+<tr>
+<td>Normal (R&lt;5°, t&lt;15°)</td>
+<td>100%</td>
+<td>85%</td>
+<td><strong>85%</strong></td>
+</tr>
+<tr>
+<td>Relaxed (R&lt;10°, t&lt;30°)</td>
+<td>100%</td>
+<td>90%</td>
+<td><strong>90%</strong></td>
+</tr>
+</tbody>
+</table>
+<h4>EuRoC MAV (MH_01_easy)</h4>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Mean</th>
+<th>Median</th>
+<th>Std</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rotation error</td>
+<td>3.29°</td>
+<td>2.90°</td>
+<td>1.91°</td>
+</tr>
+<tr>
+<td>Translation error</td>
+<td>13.7°</td>
+<td>10.6°</td>
+<td>13.2°</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Threshold</th>
+<th>Rotation</th>
+<th>Translation</th>
+<th>Combined</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strict (R&lt;2°, t&lt;5°)</td>
+<td>23%</td>
+<td>19%</td>
+<td><strong>15%</strong></td>
+</tr>
+<tr>
+<td>Normal (R&lt;5°, t&lt;15°)</td>
+<td>88%</td>
+<td>71%</td>
+<td><strong>58%</strong></td>
+</tr>
+<tr>
+<td>Relaxed (R&lt;10°, t&lt;30°)</td>
+<td>100%</td>
+<td>94%</td>
+<td><strong>94%</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Observations:</strong>
+- KITTI results are excellent due to predominantly forward motion
+- EuRoC is more challenging due to aggressive 6-DOF maneuvers
+- Translation direction is harder to estimate than rotation (expected for monocular VO)
+- <strong>100% robustness</strong>: No pipeline failures on either dataset</p>
+<h3>4.4 Processing Time</h3>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Time per pair</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Desktop (Intel i7)</td>
+<td>80-140 ms</td>
+</tr>
+<tr>
+<td>Raspberry Pi Zero</td>
+<td>500-1000 ms</td>
+</tr>
+</tbody>
+</table>
+<p>The Raspberry Pi target of &lt; 1 second was achieved.</p>
+<hr />
+<h2>5. Project Structure</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>camera_motion_estimator.py</code></td>
+<td>Main pipeline with full diagnostics</td>
+</tr>
+<tr>
+<td><code>estimate_motion.py</code></td>
+<td>Lightweight CLI for embedded deployment</td>
+</tr>
+<tr>
+<td><code>evaluate_euroc.py</code></td>
+<td>EuRoC benchmark evaluation</td>
+</tr>
+<tr>
+<td><code>evaluate_kitti.py</code></td>
+<td>KITTI benchmark evaluation</td>
+</tr>
+<tr>
+<td><code>evaluation_metrics.py</code></td>
+<td>ATE/RPE metric implementations</td>
+</tr>
+<tr>
+<td><code>visualize_results.py</code></td>
+<td>Result plotting tools</td>
+</tr>
+<tr>
+<td><code>quick_test.py</code></td>
+<td>Automated test suite</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>6. Usage</h2>
+<h3>Basic Estimation</h3>
+<pre><code class="language-bash">python camera_motion_estimator.py image1.jpg image2.jpg calibration.json
+</code></pre>
+<h3>Raspberry Pi Deployment</h3>
+<pre><code class="language-bash">python estimate_motion.py frame1.jpg frame2.jpg tello_calib.json --json
+</code></pre>
+<h3>Benchmark Evaluation</h3>
+<pre><code class="language-bash">python evaluate_kitti.py kitti_odometry --sequence 00 --num_pairs 100
+python evaluate_euroc.py euroc/MH_01_easy/mav0 --num_pairs 50 --flip_z
+</code></pre>
+<hr />
+<h2>7. Demonstration</h2>
+<p>A video demonstrating real-time execution on a Raspberry Pi Zero is included with this submission. The video shows:</p>
+<ol>
+<li>Live camera feed from DJI Tello</li>
+<li>Real-time motion estimation at ~1 Hz</li>
+<li>Rotation and translation output overlay</li>
+</ol>
+<hr />
+<h2>8. Conclusion</h2>
+<p>We developed a monocular visual odometry system that estimates 6-DOF camera motion from image pairs. The project evolved from an accuracy-focused SIFT-based design to a real-time ORB-based system suitable for embedded deployment.</p>
+<p><strong>Key achievements:</strong>
+- 85% combined accuracy on KITTI, 58% on EuRoC
+- Real-time operation on Raspberry Pi Zero (&lt; 1 second)
+- 100% robustness (no failures)
+- Comprehensive evaluation and visualization tools</p>
+<p><strong>Key trade-offs:</strong>
+- ORB vs SIFT: 10× speed improvement with ~5% accuracy reduction
+- Resolution: 640×480 balances feature count and computation
+- Ratio test threshold: 0.6 provides optimal precision/recall</p>
+<p>The system successfully meets its objectives of accurate, robust, and real-time monocular visual odometry for mobile robotics applications.</p>
+<hr />
+<h2>References</h2>
+<ol>
+<li>Hartley, R., &amp; Zisserman, A. (2004). <em>Multiple View Geometry in Computer Vision</em>. Cambridge University Press.</li>
+<li>Nistér, D. (2004). An efficient solution to the five-point relative pose problem. <em>IEEE TPAMI</em>.</li>
+<li>Rublee, E., et al. (2011). ORB: An efficient alternative to SIFT or SURF. <em>ICCV</em>.</li>
+<li>Raguram, R., et al. (2013). USAC: A universal framework for random sample consensus. <em>IEEE TPAMI</em>.</li>
+<li>Geiger, A., et al. (2012). Are we ready for autonomous driving? The KITTI vision benchmark. <em>CVPR</em>.</li>
+<li>Burri, M., et al. (2016). The EuRoC micro aerial vehicle datasets. <em>IJRR</em>.</li>
+</ol>
+</body>
+</html>

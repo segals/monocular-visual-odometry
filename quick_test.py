@@ -147,14 +147,14 @@ def test_synthetic() -> dict:
         print(f"  Rotation error: {r_err:.3f}°")
         print(f"  Translation error: {t_err:.3f}°")
         
-        passed = r_err < 1.0 and t_err < 5.0
+        passed = bool(r_err < 1.0 and t_err < 5.0)
         print_result("Synthetic Motion", passed, 
                     f"R_err={r_err:.2f}°, t_err={t_err:.2f}°")
         
         results['passed'] = passed
         results['details'] = {
-            'rotation_error': r_err,
-            'translation_error': t_err,
+            'rotation_error': float(r_err),
+            'translation_error': float(t_err),
             'num_points': len(pts1)
         }
         

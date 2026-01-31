@@ -44,9 +44,16 @@ TARGET_WIDTH = 640
 TARGET_HEIGHT = 480
 CLAHE_CLIP_LIMIT = 2.0
 CLAHE_TILE_SIZE = 8
-RATIO_TEST_THRESHOLD = 0.6
 RANSAC_THRESHOLD = 0.75
 MIN_INLIERS = 15
+
+# Optical Flow Parameters
+MAX_CORNERS = 1500
+CORNER_QUALITY = 0.01
+MIN_CORNER_DISTANCE = 7
+LK_WIN_SIZE = (21, 21)
+LK_MAX_LEVEL = 3
+FORWARD_BACKWARD_THRESHOLD = 1.0
 
 
 def load_calibration(calib_path: str) -> tuple:
@@ -116,47 +123,57 @@ def preprocess_image(image_path: str, K: np.ndarray, dist: np.ndarray,
     return gray, K_scaled
 
 
-def detect_and_match(img1: np.ndarray, img2: np.ndarray) -> tuple:
-    """Detect ORB features and match with ratio test."""
-    # ORB detector
-    orb = cv2.ORB_create(
-        nfeatures=2000,
-        scaleFactor=1.2,
-        nlevels=8,
-        edgeThreshold=31,
-        firstLevel=0,
-        WTA_K=2,
-        patchSize=31,
-        fastThreshold=20
+def detect_and_track(img1: np.ndarray, img2: np.ndarray) -> tuple:
+    """Detect features in img1 and track to img2 using optical flow."""
+    # Detect Shi-Tomasi corners in first image
+    corners = cv2.goodFeaturesToTrack(
+        img1, 
+        maxCorners=MAX_CORNERS,
+        qualityLevel=CORNER_QUALITY,
+        minDistance=MIN_CORNER_DISTANCE,
+        blockSize=7
     )
     
-    # Detect and compute
-    kp1, desc1 = orb.detectAndCompute(img1, None)
-    kp2, desc2 = orb.detectAndCompute(img2, None)
-    
-    if desc1 is None or desc2 is None or len(kp1) < MIN_INLIERS or len(kp2) < MIN_INLIERS:
+    if corners is None or len(corners) < MIN_INLIERS:
         return None, None, 0
     
-    # BFMatcher with ratio test
-    bf = cv2.BFMatcher_create(cv2.NORM_HAMMING)
-    matches = bf.knnMatch(desc1, desc2, k=2)
+    # Lucas-Kanade optical flow parameters
+    lk_params = dict(
+        winSize=LK_WIN_SIZE,
+        maxLevel=LK_MAX_LEVEL,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        minEigThreshold=0.001
+    )
     
-    # Apply ratio test
-    good_matches = []
-    for m_n in matches:
-        if len(m_n) == 2:
-            m, n = m_n
-            if m.distance < RATIO_TEST_THRESHOLD * n.distance:
-                good_matches.append(m)
+    # Forward flow: img1 -> img2
+    pts2, status_fwd, _ = cv2.calcOpticalFlowPyrLK(img1, img2, corners, None, **lk_params)
     
-    if len(good_matches) < MIN_INLIERS:
+    if pts2 is None:
         return None, None, 0
     
-    # Extract matched points
-    pts1 = np.array([kp1[m.queryIdx].pt for m in good_matches], dtype=np.float32)
-    pts2 = np.array([kp2[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+    # Backward flow: img2 -> img1 (for validation)
+    pts1_back, status_bwd, _ = cv2.calcOpticalFlowPyrLK(img2, img1, pts2, None, **lk_params)
     
-    return pts1, pts2, len(good_matches)
+    # Forward-backward consistency check
+    if pts1_back is not None:
+        fb_error = np.linalg.norm(corners - pts1_back, axis=2).flatten()
+        fb_valid = fb_error < FORWARD_BACKWARD_THRESHOLD
+    else:
+        fb_valid = np.ones(len(corners), dtype=bool)
+    
+    # Combine validity checks
+    status_fwd = status_fwd.flatten().astype(bool)
+    status_bwd = status_bwd.flatten().astype(bool) if status_bwd is not None else np.ones(len(corners), dtype=bool)
+    valid = status_fwd & status_bwd & fb_valid
+    
+    if np.sum(valid) < MIN_INLIERS:
+        return None, None, 0
+    
+    # Extract valid points
+    pts1 = corners.reshape(-1, 2)[valid].astype(np.float32)
+    pts2 = pts2.reshape(-1, 2)[valid].astype(np.float32)
+    
+    return pts1, pts2, len(pts1)
 
 
 def estimate_motion(pts1: np.ndarray, pts2: np.ndarray, K: np.ndarray) -> tuple:
@@ -248,18 +265,18 @@ Examples:
             h, w = img1.shape[:2]
             print(f"Preprocessed images to {w}x{h}", file=sys.stderr)
         
-        # Detect and match features
-        pts1, pts2, num_matches = detect_and_match(img1, img2)
+        # Detect features and track with optical flow
+        pts1, pts2, num_tracked = detect_and_track(img1, img2)
         
         if pts1 is None:
             if args.json:
-                print(json.dumps({"error": "Not enough features", "matches": num_matches}))
+                print(json.dumps({"error": "Not enough features tracked", "tracked": num_tracked}))
             else:
-                print("ERROR: Not enough features detected", file=sys.stderr)
+                print("ERROR: Not enough features tracked", file=sys.stderr)
             sys.exit(1)
         
         if args.verbose:
-            print(f"Matched features: {num_matches}", file=sys.stderr)
+            print(f"Tracked features: {num_tracked}", file=sys.stderr)
         
         # Estimate motion
         R, t, num_inliers, quality = estimate_motion(pts1, pts2, K_scaled)
