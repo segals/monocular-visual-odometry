@@ -118,56 +118,45 @@ def preprocess_image(image_path: str, K: np.ndarray, dist: np.ndarray,
 
 def detect_and_match(img1: np.ndarray, img2: np.ndarray) -> tuple:
     """Detect ORB features and match with ratio test."""
+    # ORB detector
+    orb = cv2.ORB_create(
+        nfeatures=2000,
+        scaleFactor=1.2,
+        nlevels=8,
+        edgeThreshold=31,
+        firstLevel=0,
+        WTA_K=2,
+        patchSize=31,
+        fastThreshold=20
+    )
     
-    # Try with different settings if needed
-    configs = [
-        # Default config
-        {'nfeatures': 2000, 'fastThreshold': 20, 'ratio': RATIO_TEST_THRESHOLD},
-        # More features, lower threshold for low-texture scenes
-        {'nfeatures': 5000, 'fastThreshold': 10, 'ratio': 0.7},
-        # Even more aggressive for very low texture
-        {'nfeatures': 10000, 'fastThreshold': 5, 'ratio': 0.75},
-    ]
+    # Detect and compute
+    kp1, desc1 = orb.detectAndCompute(img1, None)
+    kp2, desc2 = orb.detectAndCompute(img2, None)
     
-    for config in configs:
-        # ORB detector
-        orb = cv2.ORB_create(
-            nfeatures=config['nfeatures'],
-            scaleFactor=1.2,
-            nlevels=8,
-            edgeThreshold=15,  # Lower edge threshold to detect more features
-            firstLevel=0,
-            WTA_K=2,
-            patchSize=31,
-            fastThreshold=config['fastThreshold']
-        )
-        
-        # Detect and compute
-        kp1, desc1 = orb.detectAndCompute(img1, None)
-        kp2, desc2 = orb.detectAndCompute(img2, None)
-        
-        if desc1 is None or desc2 is None or len(kp1) < MIN_INLIERS or len(kp2) < MIN_INLIERS:
-            continue
-        
-        # BFMatcher with ratio test
-        bf = cv2.BFMatcher_create(cv2.NORM_HAMMING)
-        matches = bf.knnMatch(desc1, desc2, k=2)
-        
-        # Apply ratio test
-        good_matches = []
-        for m_n in matches:
-            if len(m_n) == 2:
-                m, n = m_n
-                if m.distance < config['ratio'] * n.distance:
-                    good_matches.append(m)
-        
-        if len(good_matches) >= MIN_INLIERS:
-            # Extract matched points
-            pts1 = np.array([kp1[m.queryIdx].pt for m in good_matches], dtype=np.float32)
-            pts2 = np.array([kp2[m.trainIdx].pt for m in good_matches], dtype=np.float32)
-            return pts1, pts2, len(good_matches)
+    if desc1 is None or desc2 is None or len(kp1) < MIN_INLIERS or len(kp2) < MIN_INLIERS:
+        return None, None, 0
     
-    return None, None, 0
+    # BFMatcher with ratio test
+    bf = cv2.BFMatcher_create(cv2.NORM_HAMMING)
+    matches = bf.knnMatch(desc1, desc2, k=2)
+    
+    # Apply ratio test
+    good_matches = []
+    for m_n in matches:
+        if len(m_n) == 2:
+            m, n = m_n
+            if m.distance < RATIO_TEST_THRESHOLD * n.distance:
+                good_matches.append(m)
+    
+    if len(good_matches) < MIN_INLIERS:
+        return None, None, 0
+    
+    # Extract matched points
+    pts1 = np.array([kp1[m.queryIdx].pt for m in good_matches], dtype=np.float32)
+    pts2 = np.array([kp2[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+    
+    return pts1, pts2, len(good_matches)
 
 
 def estimate_motion(pts1: np.ndarray, pts2: np.ndarray, K: np.ndarray) -> tuple:
