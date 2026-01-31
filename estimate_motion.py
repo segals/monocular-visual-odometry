@@ -226,10 +226,11 @@ Examples:
     parser.add_argument('calibration', type=str, help='Path to calibration JSON file')
     parser.add_argument('--json', action='store_true', help='Output as JSON')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    parser.add_argument('--preserve-aspect', '-p', action='store_true', 
-                        help='Preserve aspect ratio (use for non-Tello cameras like KITTI)')
+    parser.add_argument('--no-preserve-aspect', action='store_true', 
+                        help='Force exact 640x480 output (may distort non-4:3 images)')
     
     args = parser.parse_args()
+    preserve_aspect = not args.no_preserve_aspect  # Default: preserve aspect ratio
     
     try:
         # Load calibration
@@ -240,8 +241,8 @@ Examples:
             print(f"  Original resolution: {orig_w}x{orig_h}", file=sys.stderr)
         
         # Preprocess images
-        img1, K_scaled = preprocess_image(args.image1, K, dist, orig_w, orig_h, args.preserve_aspect)
-        img2, _ = preprocess_image(args.image2, K, dist, orig_w, orig_h, args.preserve_aspect)
+        img1, K_scaled = preprocess_image(args.image1, K, dist, orig_w, orig_h, preserve_aspect)
+        img2, _ = preprocess_image(args.image2, K, dist, orig_w, orig_h, preserve_aspect)
         
         if args.verbose:
             h, w = img1.shape[:2]
