@@ -23,6 +23,12 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+# =============================================================================
+# PERFORMANCE: Use all CPU cores for OpenCV
+# =============================================================================
+cv2.setNumThreads(0)  # 0 = use all available cores
+cv2.setUseOptimized(True)  # Use optimized code paths
+
 
 # =============================================================================
 # Configuration Constants
@@ -1222,7 +1228,7 @@ class GeometryEstimator:
 class CameraMotionEstimator:
     """Main pipeline for 6-DOF camera motion estimation."""
     
-    def __init__(self, calibration_path: str, preserve_aspect_ratio: bool = True):
+    def __init__(self, calibration_path: str, preserve_aspect_ratio: bool = True, verbose: bool = True):
         """Initialize with calibration matrix.
         
         Args:
@@ -1231,12 +1237,14 @@ class CameraMotionEstimator:
                                    downsampling (good for KITTI, datasets with different
                                    aspect ratios). If False, forces exact target dimensions
                                    (use for DJI Tello with fixed calibration).
+            verbose: If True (default), prints detailed pipeline output. If False, silent.
         """
         self.preprocessor = ImagePreprocessor(preserve_aspect_ratio=preserve_aspect_ratio)
         self.calibration = CalibrationHandler()
         self.calibration.load_calibration(calibration_path)
         self.feature_processor = FeatureProcessor()
         self.geometry_estimator = None  # Initialized after scaling K
+        self.verbose = verbose
         
     def estimate(self, image1_path: str, image2_path: str) -> MotionEstimationResult:
         """
@@ -1266,14 +1274,19 @@ class CameraMotionEstimator:
         Internal motion estimation - called by estimate() with exception handling.
         """
         
-        print("=" * 70)
-        print("6-DOF Camera Motion Estimation Pipeline")
-        print("=" * 70)
+        # Helper for conditional printing
+        def vprint(*args, **kwargs):
+            if self.verbose:
+                vprint(*args, **kwargs)
+        
+        vprint("=" * 70)
+        vprint("6-DOF Camera Motion Estimation Pipeline")
+        vprint("=" * 70)
         
         # ---------------------------------------------------------------------
         # Stage 1: Image Preprocessing
         # ---------------------------------------------------------------------
-        print("\n[Stage 1] Image Preprocessing...")
+        vprint("\n[Stage 1] Image Preprocessing...")
         
         img1, warnings1 = self.preprocessor.preprocess(image1_path)
         metrics.warnings.extend([f"Image 1: {w}" for w in warnings1])
@@ -1288,19 +1301,19 @@ class CameraMotionEstimator:
         )
         self.geometry_estimator = GeometryEstimator(K_scaled)
         
-        print(f"  Original resolution: {int(TARGET_WIDTH/self.preprocessor.scale_x)}x{int(TARGET_HEIGHT/self.preprocessor.scale_y)}")
-        print(f"  Downsampled to: {TARGET_WIDTH}x{TARGET_HEIGHT}")
-        print(f"  Scale factors: ({self.preprocessor.scale_x:.4f}, {self.preprocessor.scale_y:.4f})")
+        vprint(f"  Original resolution: {int(TARGET_WIDTH/self.preprocessor.scale_x)}x{int(TARGET_HEIGHT/self.preprocessor.scale_y)}")
+        vprint(f"  Downsampled to: {TARGET_WIDTH}x{TARGET_HEIGHT}")
+        vprint(f"  Scale factors: ({self.preprocessor.scale_x:.4f}, {self.preprocessor.scale_y:.4f})")
         
         if warnings1 or warnings2:
-            print("  Warnings detected:")
+            vprint("  Warnings detected:")
             for w in warnings1 + warnings2:
-                print(f"    - {w}")
+                vprint(f"    - {w}")
         
         # ---------------------------------------------------------------------
         # Stage 2: Feature Detection
         # ---------------------------------------------------------------------
-        print("\n[Stage 2] Feature Detection (ORB)...")
+        vprint("\n[Stage 2] Feature Detection (ORB)...")
         
         kp1, desc1 = self.feature_processor.detect_and_compute(img1)
         kp2, desc2 = self.feature_processor.detect_and_compute(img2)
@@ -1308,8 +1321,8 @@ class CameraMotionEstimator:
         metrics.features_image1 = len(kp1)
         metrics.features_image2 = len(kp2)
         
-        print(f"  Image 1: {len(kp1)} features detected")
-        print(f"  Image 2: {len(kp2)} features detected")
+        vprint(f"  Image 1: {len(kp1)} features detected")
+        vprint(f"  Image 2: {len(kp2)} features detected")
         
         if len(kp1) < MIN_FEATURES_WARNING:
             metrics.warnings.append(f"Low feature count in image 1: {len(kp1)}")
@@ -1318,39 +1331,39 @@ class CameraMotionEstimator:
         
         # Check for critical failure
         if desc1 is None or desc2 is None or len(kp1) < 8 or len(kp2) < 8:
-            print("  [CRITICAL] Insufficient features detected!")
+            vprint("  [CRITICAL] Insufficient features detected!")
             return self._create_identity_result(metrics, start_time)
         
         # ---------------------------------------------------------------------
         # Stage 3: Feature Matching
         # ---------------------------------------------------------------------
-        print("\n[Stage 3] Feature Matching...")
+        vprint("\n[Stage 3] Feature Matching...")
         
         # Initial matching
         raw_matches = self.feature_processor.match_features(desc1, desc2)
         metrics.raw_matches = len(raw_matches)
-        print(f"  Raw kNN matches: {len(raw_matches)}")
+        vprint(f"  Raw kNN matches: {len(raw_matches)}")
         
         # Ratio test
         ratio_matches = self.feature_processor.apply_ratio_test(raw_matches)
         metrics.ratio_test_matches = len(ratio_matches)
-        print(f"  After ratio test (threshold={RATIO_TEST_THRESHOLD}): {len(ratio_matches)}")
+        vprint(f"  After ratio test (threshold={RATIO_TEST_THRESHOLD}): {len(ratio_matches)}")
         
         # Cross-check
         cross_checked = self.feature_processor.apply_cross_check(desc1, desc2, ratio_matches)
         metrics.cross_check_matches = len(cross_checked)
-        print(f"  After cross-check: {len(cross_checked)}")
+        vprint(f"  After cross-check: {len(cross_checked)}")
         
         # Distance filter
         filtered_matches = self.feature_processor.filter_by_distance(cross_checked)
-        print(f"  After distance filter (max={MAX_HAMMING_DISTANCE}): {len(filtered_matches)}")
+        vprint(f"  After distance filter (max={MAX_HAMMING_DISTANCE}): {len(filtered_matches)}")
         
         if len(filtered_matches) < MIN_MATCHES_WARNING:
             metrics.warnings.append(f"Low match count: {len(filtered_matches)}")
             
         # Check for critical failure
         if len(filtered_matches) < MIN_INLIERS_CRITICAL:
-            print("  [CRITICAL] Insufficient matches!")
+            vprint("  [CRITICAL] Insufficient matches!")
             return self._create_identity_result(metrics, start_time)
         
         # Extract point coordinates
@@ -1362,24 +1375,24 @@ class CameraMotionEstimator:
         mean_flow = np.mean(flow_magnitudes)
         median_flow = np.median(flow_magnitudes)
         
-        print(f"  Average optical flow: {mean_flow:.2f} px (median: {median_flow:.2f} px)")
+        vprint(f"  Average optical flow: {mean_flow:.2f} px (median: {median_flow:.2f} px)")
         
         # Flag for small motion (translation direction may be unreliable)
         small_motion = median_flow < 3.0  # Less than 3 pixels median displacement
         if small_motion:
-            print("  [WARNING] Small motion detected - translation direction may be less reliable")
+            vprint("  [WARNING] Small motion detected - translation direction may be less reliable")
             metrics.warnings.append("Small camera motion detected")
         
         # ---------------------------------------------------------------------
         # Stage 4: Essential Matrix Estimation (Direct Method with USAC)
         # ---------------------------------------------------------------------
-        print("\n[Stage 4] Essential Matrix Estimation (Direct with USAC)...")
+        vprint("\n[Stage 4] Essential Matrix Estimation (Direct with USAC)...")
         
         # Try direct essential matrix estimation first (more accurate)
         E_direct, inlier_mask_E = self.geometry_estimator.estimate_essential_matrix_direct(pts1, pts2)
         
         if E_direct is not None:
-            print("  Using direct Essential matrix estimation")
+            vprint("  Using direct Essential matrix estimation")
             E = E_direct
             inlier_mask = inlier_mask_E
             
@@ -1387,11 +1400,11 @@ class CameraMotionEstimator:
             F = self.geometry_estimator.K_inv.T @ E @ self.geometry_estimator.K_inv
         else:
             # Fallback to Fundamental matrix approach
-            print("  Falling back to Fundamental matrix estimation")
+            vprint("  Falling back to Fundamental matrix estimation")
             F, inlier_mask = self.geometry_estimator.estimate_fundamental_matrix(pts1, pts2)
             
             if F is None:
-                print("  [CRITICAL] Failed to estimate fundamental matrix!")
+                vprint("  [CRITICAL] Failed to estimate fundamental matrix!")
                 return self._create_identity_result(metrics, start_time)
             
             E = self.geometry_estimator.compute_essential_matrix(F)
@@ -1418,7 +1431,7 @@ class CameraMotionEstimator:
             if np.sum(epipolar_good) >= MIN_INLIERS_CRITICAL:
                 inlier_pts1 = inlier_pts1[epipolar_good]
                 inlier_pts2 = inlier_pts2[epipolar_good]
-                print(f"  After epipolar refinement: {len(inlier_pts1)} points")
+                vprint(f"  After epipolar refinement: {len(inlier_pts1)} points")
         
         # Apply cv2.correctMatches for sub-pixel refinement
         # This optimally triangulates points by adjusting them to satisfy epipolar constraint
@@ -1432,7 +1445,7 @@ class CameraMotionEstimator:
                 if pts1_refined is not None and pts2_refined is not None:
                     inlier_pts1 = pts1_refined.reshape(-1, 2)
                     inlier_pts2 = pts2_refined.reshape(-1, 2)
-                    print(f"  Applied optimal triangulation correction")
+                    vprint(f"  Applied optimal triangulation correction")
             except cv2.error:
                 pass  # Keep original points if correction fails
         
@@ -1447,18 +1460,18 @@ class CameraMotionEstimator:
                 mask_refined = mask_refined.ravel().astype(bool)
                 inlier_pts1 = inlier_pts1[mask_refined]
                 inlier_pts2 = inlier_pts2[mask_refined]
-                print(f"  Re-estimated E with {len(inlier_pts1)} cleaned inliers")
+                vprint(f"  Re-estimated E with {len(inlier_pts1)} cleaned inliers")
         
         metrics.ransac_inliers = len(inlier_pts1)
         metrics.inlier_ratio = len(inlier_pts1) / len(pts1) if len(pts1) > 0 else 0
         
-        print(f"  Inliers: {metrics.ransac_inliers} / {len(pts1)} ({metrics.inlier_ratio*100:.1f}%)")
+        vprint(f"  Inliers: {metrics.ransac_inliers} / {len(pts1)} ({metrics.inlier_ratio*100:.1f}%)")
         
         if metrics.ransac_inliers < MIN_INLIERS_WARNING:
             metrics.warnings.append(f"Low inlier count after RANSAC: {metrics.ransac_inliers}")
             
         if metrics.ransac_inliers < MIN_INLIERS_CRITICAL:
-            print("  [CRITICAL] Insufficient inliers!")
+            vprint("  [CRITICAL] Insufficient inliers!")
             return self._create_identity_result(metrics, start_time)
         
         # Compute Sampson errors using F
@@ -1468,7 +1481,7 @@ class CameraMotionEstimator:
                 F = self.geometry_estimator.K_inv.T @ E @ self.geometry_estimator.K_inv
             metrics.fundamental_matrix_rank = np.linalg.matrix_rank(F)
             sampson_errors = self.geometry_estimator.compute_sampson_error(F, inlier_pts1, inlier_pts2)
-            print(f"  Sampson error - Mean: {np.mean(sampson_errors):.4f}, Median: {np.median(sampson_errors):.4f}")
+            vprint(f"  Sampson error - Mean: {np.mean(sampson_errors):.4f}, Median: {np.median(sampson_errors):.4f}")
         except:
             F = np.eye(3)  # Fallback
             metrics.fundamental_matrix_rank = 3
@@ -1476,18 +1489,18 @@ class CameraMotionEstimator:
         # ---------------------------------------------------------------------
         # Stage 5: Essential Matrix Verification
         # ---------------------------------------------------------------------
-        print("\n[Stage 5] Essential Matrix Verification...")
+        vprint("\n[Stage 5] Essential Matrix Verification...")
         
         # Check singular values
         U, S, Vt = np.linalg.svd(E)
-        print(f"  Singular values: [{S[0]:.6f}, {S[1]:.6f}, {S[2]:.6f}]")
+        vprint(f"  Singular values: [{S[0]:.6f}, {S[1]:.6f}, {S[2]:.6f}]")
         
         metrics.essential_matrix_condition = S[0] / (S[1] + 1e-10)
         
         # ---------------------------------------------------------------------
         # Stage 6: Motion Decomposition with Comprehensive Pose Selection
         # ---------------------------------------------------------------------
-        print("\n[Stage 6] Motion Decomposition (R, t) with Comprehensive Selection...")
+        vprint("\n[Stage 6] Motion Decomposition (R, t) with Comprehensive Selection...")
         
         # ALWAYS use comprehensive pose selection with triangulation quality
         # This evaluates all 4 solutions and picks the one with:
@@ -1515,9 +1528,9 @@ class CameraMotionEstimator:
             
             if score_cv > score_ours:
                 R, t, num_positive = R_cv, t_cv, num_cv
-                print(f"  Using OpenCV pose (better quality)")
+                vprint(f"  Using OpenCV pose (better quality)")
             else:
-                print(f"  Keeping refined pose (better quality)")
+                vprint(f"  Keeping refined pose (better quality)")
         
         # ---------------------------------------------------------------------
         # Stage 6b: Translation Validation using Flow-Based Cross-Check
@@ -1531,7 +1544,7 @@ class CameraMotionEstimator:
             # Cosine similarity - should be high if consistent
             cos_sim = abs(np.dot(t_flat, t_flow_flat) / (np.linalg.norm(t_flat) * np.linalg.norm(t_flow_flat) + 1e-10))
             
-            print(f"  Translation validation: E-based vs flow-based cos_sim = {cos_sim:.4f}")
+            vprint(f"  Translation validation: E-based vs flow-based cos_sim = {cos_sim:.4f}")
             
             # If low consistency, try negating translation (sign ambiguity)
             if cos_sim < 0.7:
@@ -1543,19 +1556,19 @@ class CameraMotionEstimator:
                     # Negated translation matches flow better - check cheirality
                     num_neg = self.geometry_estimator._count_points_in_front(R, t_neg, inlier_pts1, inlier_pts2)
                     if num_neg >= num_positive * 0.9:  # Strict cheirality requirement
-                        print(f"  Flipping translation sign (cos_sim: {cos_sim:.3f} -> {cos_sim_neg:.3f}, cheirality OK)")
+                        vprint(f"  Flipping translation sign (cos_sim: {cos_sim:.3f} -> {cos_sim_neg:.3f}, cheirality OK)")
                         t = t_neg
                         num_positive = num_neg
                     else:
-                        print(f"  Translation flip rejected (cheirality failed: {num_neg} < {num_positive*0.9:.0f})")
+                        vprint(f"  Translation flip rejected (cheirality failed: {num_neg} < {num_positive*0.9:.0f})")
         
         metrics.cheirality_positive_ratio = num_positive / len(inlier_pts1) if len(inlier_pts1) > 0 else 0
-        print(f"  Cheirality check: {num_positive}/{len(inlier_pts1)} points in front ({metrics.cheirality_positive_ratio*100:.1f}%)")
+        vprint(f"  Cheirality check: {num_positive}/{len(inlier_pts1)} points in front ({metrics.cheirality_positive_ratio*100:.1f}%)")
         
         
         # Verify rotation matrix
         det_R = np.linalg.det(R)
-        print(f"  det(R) = {det_R:.6f}")
+        vprint(f"  det(R) = {det_R:.6f}")
         
         if abs(det_R - 1.0) > 0.01:
             metrics.warnings.append(f"Rotation matrix determinant deviation: {det_R:.6f}")
@@ -1564,7 +1577,7 @@ class CameraMotionEstimator:
             R = U_R @ Vt_R
             if np.linalg.det(R) < 0:
                 R = -R
-            print(f"  Fixed det(R) = {np.linalg.det(R):.6f}")
+            vprint(f"  Fixed det(R) = {np.linalg.det(R):.6f}")
             
         # Compute reprojection error
         reproj_errors = self.geometry_estimator.compute_reprojection_error(R, t, inlier_pts1, inlier_pts2)
@@ -1572,7 +1585,7 @@ class CameraMotionEstimator:
         metrics.median_reprojection_error = float(np.median(reproj_errors))
         metrics.max_reprojection_error = float(np.max(reproj_errors))
         
-        print(f"  Reprojection error - Mean: {metrics.mean_reprojection_error:.4f} px, "
+        vprint(f"  Reprojection error - Mean: {metrics.mean_reprojection_error:.4f} px, "
               f"Median: {metrics.median_reprojection_error:.4f} px, Max: {metrics.max_reprojection_error:.4f} px")
         
         # Ensure t is unit vector
@@ -1624,43 +1637,43 @@ class CameraMotionEstimator:
 
 def print_result(result: MotionEstimationResult):
     """Print estimation results to console."""
-    print("\n" + "=" * 70)
-    print("ESTIMATION RESULTS")
-    print("=" * 70)
+    vprint("\n" + "=" * 70)
+    vprint("ESTIMATION RESULTS")
+    vprint("=" * 70)
     
-    print("\n[Rotation Matrix R (3x3)]:")
-    print(np.array2string(result.R, precision=8, suppress_small=True, 
+    vprint("\n[Rotation Matrix R (3x3)]:")
+    vprint(np.array2string(result.R, precision=8, suppress_small=True, 
                           formatter={'float_kind': lambda x: f"{x:12.8f}"}))
     
-    print("\n[Translation Vector t (3x1, unit norm)]:")
-    print(np.array2string(result.t.flatten(), precision=8, suppress_small=True,
+    vprint("\n[Translation Vector t (3x1, unit norm)]:")
+    vprint(np.array2string(result.t.flatten(), precision=8, suppress_small=True,
                           formatter={'float_kind': lambda x: f"{x:12.8f}"}))
     
     # Convert rotation to axis-angle for interpretability
     angle = np.arccos(np.clip((np.trace(result.R) - 1) / 2, -1, 1))
-    print(f"\n[Rotation Angle]: {np.degrees(angle):.4f} degrees")
+    vprint(f"\n[Rotation Angle]: {np.degrees(angle):.4f} degrees")
     
-    print(f"\n[Processing Time]: {result.processing_time_ms:.2f} ms")
+    vprint(f"\n[Processing Time]: {result.processing_time_ms:.2f} ms")
     
-    print("\n[Quality Metrics]:")
+    vprint("\n[Quality Metrics]:")
     m = result.metrics
-    print(f"  Features detected:     Image1={m.features_image1}, Image2={m.features_image2}")
-    print(f"  Matches:               Raw={m.raw_matches}, After ratio test={m.ratio_test_matches}")
-    print(f"  Cross-checked matches: {m.cross_check_matches}")
-    print(f"  RANSAC inliers:        {m.ransac_inliers} ({m.inlier_ratio*100:.1f}%)")
-    print(f"  Reprojection error:    Mean={m.mean_reprojection_error:.4f} px, Median={m.median_reprojection_error:.4f} px")
-    print(f"  Cheirality ratio:      {m.cheirality_positive_ratio*100:.1f}%")
-    print(f"  Quality Score:         {m.quality_score:.1f}/100")
+    vprint(f"  Features detected:     Image1={m.features_image1}, Image2={m.features_image2}")
+    vprint(f"  Matches:               Raw={m.raw_matches}, After ratio test={m.ratio_test_matches}")
+    vprint(f"  Cross-checked matches: {m.cross_check_matches}")
+    vprint(f"  RANSAC inliers:        {m.ransac_inliers} ({m.inlier_ratio*100:.1f}%)")
+    vprint(f"  Reprojection error:    Mean={m.mean_reprojection_error:.4f} px, Median={m.median_reprojection_error:.4f} px")
+    vprint(f"  Cheirality ratio:      {m.cheirality_positive_ratio*100:.1f}%")
+    vprint(f"  Quality Score:         {m.quality_score:.1f}/100")
     
     if m.warnings:
-        print("\n[Warnings]:")
+        vprint("\n[Warnings]:")
         for warning in m.warnings:
-            print(f"  ⚠ {warning}")
+            vprint(f"  ⚠ {warning}")
     
     if m.quality_score < 50:
-        print("\n" + "!" * 70)
-        print("WARNING: Low quality estimation! Results may be unreliable.")
-        print("!" * 70)
+        vprint("\n" + "!" * 70)
+        vprint("WARNING: Low quality estimation! Results may be unreliable.")
+        vprint("!" * 70)
 
 
 def save_results(result: MotionEstimationResult, output_dir: str, prefix: str = "motion"):
@@ -1735,13 +1748,13 @@ def save_results(result: MotionEstimationResult, output_dir: str, prefix: str = 
     with open(json_path, 'w') as f:
         json.dump(json_data, f, indent=2)
     
-    print(f"\n[Output Files Saved]:")
-    print(f"  Rotation matrix:    {R_path}")
-    print(f"  Translation vector: {t_path}")
-    print(f"  Fundamental matrix: {F_path}")
-    print(f"  Essential matrix:   {E_path}")
-    print(f"  Summary:            {summary_path}")
-    print(f"  JSON result:        {json_path}")
+    vprint(f"\n[Output Files Saved]:")
+    vprint(f"  Rotation matrix:    {R_path}")
+    vprint(f"  Translation vector: {t_path}")
+    vprint(f"  Fundamental matrix: {F_path}")
+    vprint(f"  Essential matrix:   {E_path}")
+    vprint(f"  Summary:            {summary_path}")
+    vprint(f"  JSON result:        {json_path}")
 
 
 # =============================================================================
@@ -1775,7 +1788,7 @@ Calibration file formats supported:
     # Validate input files
     for path in [args.image1, args.image2, args.calibration]:
         if not Path(path).exists():
-            print(f"Error: File not found: {path}")
+            vprint(f"Error: File not found: {path}")
             sys.exit(1)
     
     try:
@@ -1800,7 +1813,7 @@ Calibration file formats supported:
             sys.exit(0)  # Success
             
     except Exception as e:
-        print(f"\n[ERROR] {str(e)}")
+        vprint(f"\n[ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(3)
