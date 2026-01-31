@@ -852,4 +852,33 @@ def test_on_kitti():
 
 
 if __name__ == "__main__":
-    test_on_kitti()
+    import sys
+    
+    if len(sys.argv) == 4:
+        # Usage: python visual_odometry.py <calibration.json> <image1> <image2>
+        calib_path = sys.argv[1]
+        image1_path = sys.argv[2]
+        image2_path = sys.argv[3]
+        
+        vo = VisualOdometry(calib_path)
+        result = vo.estimate_motion(image1_path, image2_path)
+        
+        if result.success:
+            print("Rotation matrix (R):")
+            print(result.R)
+            print()
+            print("Translation vector (t):")
+            print(result.t)
+        else:
+            print("Motion estimation failed")
+            sys.exit(1)
+    
+    elif len(sys.argv) == 1:
+        # No arguments: run KITTI evaluation
+        test_on_kitti()
+    
+    else:
+        print("Usage:")
+        print("  python visual_odometry.py <calibration.json> <image1> <image2>")
+        print("  python visual_odometry.py   (runs KITTI evaluation)")
+        sys.exit(1)
