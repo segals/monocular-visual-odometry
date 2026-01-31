@@ -1,7 +1,7 @@
 """
 Visual Odometry with Real-Time Visualization
 =============================================
-Uses YOUR CameraMotionEstimator code with friend's visualization style.
+Uses the new VisualOdometry class for motion estimation.
 Top-down view with video side-by-side.
 
 Usage:
@@ -17,7 +17,7 @@ import tempfile
 import json
 from pathlib import Path
 
-from camera_motion_estimator import CameraMotionEstimator
+from visual_odometry import VisualOdometry
 
 
 # =============================================================================
@@ -184,14 +184,14 @@ class TrajectoryVisualizer:
         
         return traj_img
     
-    def draw_frame_with_info(self, frame, quality_score, num_inliers, success):
+    def draw_frame_with_info(self, frame, quality_score, num_inliers, success, skip_count=0):
         """Draw the video frame with tracking info."""
         vis = frame.copy()
         vis = cv2.resize(vis, (self.video_width, self.video_height))
         
         # Info overlay
         color = (0, 255, 0) if success else (0, 0, 255)
-        status = "OK" if success else "SKIP"
+        status = "OK" if success else f"SKIP ({skip_count})"
         
         cv2.putText(vis, f"Quality: {quality_score:.0f}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
@@ -264,9 +264,9 @@ def run_realtime_vo(video_path, calibration_path, frame_step=1):
     else:
         print(f"Calibration: {calibration_path}")
     
-    # Create YOUR estimator
-    print("\nUsing YOUR CameraMotionEstimator code!")
-    estimator = CameraMotionEstimator(calibration_path, preserve_aspect_ratio=True, verbose=False)
+    # Create VisualOdometry estimator
+    print("\nUsing VisualOdometry (SIFT + FLANN)!")
+    vo = VisualOdometry(calibration_path)
     
     # Temp files for frame saving
     temp_dir = tempfile.mkdtemp()
@@ -291,9 +291,10 @@ def run_realtime_vo(video_path, calibration_path, frame_step=1):
     frame_idx = 1
     last_proc_idx = 0
     paused = False
+    skip_count = 0  # Track consecutive skipped frames
     
     # Initial display
-    frame_vis = visualizer.draw_frame_with_info(prev_frame, 0, 0, False)
+    frame_vis = visualizer.draw_frame_with_info(prev_frame, 0, 0, False, 0)
     quality_score = 0
     num_inliers = 0
     success = False
@@ -314,30 +315,27 @@ def run_realtime_vo(video_path, calibration_path, frame_step=1):
                 cv2.imwrite(path1, prev_frame)
                 cv2.imwrite(path2, curr_frame)
                 
-                # Run YOUR estimator
-                result = estimator.estimate(path1, path2)
+                # Run VisualOdometry estimator
+                result = vo.estimate_motion(path1, path2, verbose=False)
                 
-                if result is not None:
-                    quality_score = result.metrics.quality_score
-                    num_inliers = result.metrics.ransac_inliers
-                    success = quality_score >= 50
-                    
-                    if success:
-                        R, t = result.R, result.t
-                        visualizer.update(R, t, True)
-                    else:
-                        visualizer.update(None, None, False)
+                quality_score = result.num_inliers  # Use inliers as quality indicator
+                num_inliers = result.num_inliers
+                success = result.success and result.num_inliers >= 20
+                
+                if success:
+                    R, t = result.R, result.t
+                    visualizer.update(R, t, True)
+                    skip_count = 0  # Reset skip counter on success
                 else:
-                    quality_score = 0
-                    num_inliers = 0
-                    success = False
                     visualizer.update(None, None, False)
+                    skip_count += 1
                 
+                # Always update prev_frame so we don't get stuck comparing old frames
                 prev_frame = curr_frame.copy()
                 last_proc_idx = frame_idx
             
             # Draw current frame with info
-            frame_vis = visualizer.draw_frame_with_info(curr_frame, quality_score, num_inliers, success)
+            frame_vis = visualizer.draw_frame_with_info(curr_frame, quality_score, num_inliers, success, skip_count)
             frame_idx += 1
         
         # Create combined view
