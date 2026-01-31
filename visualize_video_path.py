@@ -44,7 +44,7 @@ def extract_frames(video_path: str, frame_step: int = 10):
     return frames, frame_indices
 
 
-def estimate_trajectory(frames: list, calibration_path: str = None):
+def estimate_trajectory(frames: list, calibration_path: str | None = None):
     """
     Estimate camera trajectory from sequence of frames.
     Returns list of (x, z) positions in top-down view.
@@ -77,7 +77,6 @@ def estimate_trajectory(frames: list, calibration_path: str = None):
     
     # Create estimator
     estimator = CameraMotionEstimator(calibration_path, preserve_aspect_ratio=True)
-    estimator.verbose = False
     
     # Initialize trajectory
     positions = [(0.0, 0.0)]  # (x, z) in world coordinates
@@ -150,7 +149,7 @@ def estimate_trajectory(frames: list, calibration_path: str = None):
     return positions, rotations, translations
 
 
-def plot_trajectory(positions: list, output_path: str = None, title: str = "Camera Trajectory (Top-Down View)"):
+def plot_trajectory(positions: list, output_path: str | None = None, title: str = "Camera Trajectory (Top-Down View)"):
     """Plot top-down view of camera trajectory."""
     
     x_coords = [p[0] for p in positions]
